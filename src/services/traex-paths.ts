@@ -7,13 +7,46 @@ import { expandHomePath as expandHome } from '../utils/working-dir.js';
  *  dynamic so tests and child processes that set TRAE_HOME after module load
  *  still resolve correctly. */
 export function traeHome(): string {
-  const configured = process.env.TRAE_HOME?.trim();
+  return traeHomeFor(process.env);
+}
+
+/** TRAE_HOME as `env` resolves it. A per-bot `env.TRAE_HOME` reaches only the
+ *  CLI child, not the worker's own process.env, so anything computed FOR the
+ *  child (its sandbox binds) must use the child's env, not traeHome(). */
+export function traeHomeFor(env: NodeJS.ProcessEnv): string {
+  const configured = env.TRAE_HOME?.trim();
   return configured ? expandHome(configured) : join(homedir(), '.trae');
 }
 
+/**
+ * A per-bot TRAE_HOME reaches only the CLI child. Under the sandbox the child
+ * sees only binds computed from its own TRAE_HOME, so the worker's own readers
+ * (state DB / history / rollouts / Gateway config, all via traeHome()) must
+ * follow it too, or resume lookup and submit confirmation read a root the CLI
+ * never writes. Re-derived from the boot value on every spawn so a removed
+ * override does not stick. Unsandboxed sessions and other CLIs: untouched.
+ */
+export function pinSandboxedTraeHome(env: NodeJS.ProcessEnv, opts: {
+  sandboxed: boolean;
+  cliId: string;
+  perBotEnv: Record<string, string>;
+  bootTraeHome: string | undefined;
+}): void {
+  if (!opts.sandboxed || (opts.cliId !== 'traex' && opts.cliId !== 'coco')) return;
+  const value = opts.perBotEnv.TRAE_HOME?.trim() || opts.bootTraeHome;
+  if (value) env.TRAE_HOME = value;
+  else delete env.TRAE_HOME;
+}
+
 /** TraeX and CoCo share the same Codex-compatible TOML configuration. */
-export function traeConfigPath(): string {
-  return join(traeHome(), 'traecli.toml');
+export function traeConfigPath(env: NodeJS.ProcessEnv = process.env): string {
+  return join(traeHomeFor(env), 'traecli.toml');
+}
+
+/** TRAE's state root (SQLite DBs, history, sessions) the sandbox binds
+ *  read-write for a child running with `env`. */
+export function traeCliStatePath(env: NodeJS.ProcessEnv = process.env): string {
+  return join(traeHomeFor(env), 'cli');
 }
 
 /** SQLite database holding the `threads` table (one row per interactive
