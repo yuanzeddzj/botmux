@@ -25,7 +25,7 @@ afterEach(async () => {
   root = undefined;
 });
 
-async function startFixture(order: 'composer-first' | 'terminal-first' | 'no-terminal' | 'failed-terminal' | 'redraw-only', backendType: 'pty' | 'tmux' = 'pty') {
+async function startFixture(order: 'composer-first' | 'terminal-first' | 'no-terminal' | 'failed-terminal' | 'redraw-only' | 'fast-terminal' | 'fast-failed', backendType: 'pty' | 'tmux' = 'pty') {
   root = mkdtempSync(join(tmpdir(), 'botmux-first-terminal-test-'));
   const data = join(root, 'data');
   const grokHome = join(root, '.grok');
@@ -90,6 +90,14 @@ process.stdin.on('data', bytes => {
     writes.push(body); fs.writeFileSync(writesPath,JSON.stringify(writes));
     fs.appendFileSync(history,JSON.stringify({session_id:sid,prompt:body,is_bash:false})+'\\n');
     start(body);
+    if (order === 'fast-terminal' || order === 'fast-failed') {
+      const completedTurn = turn;
+      setTimeout(() => {
+        if (turn !== completedTurn) return;
+        finished = turn; composer();
+        update({sessionUpdate:'turn_completed',stop_reason:order === 'fast-failed' ? 'error' : 'end_turn'});
+      }, 50);
+    }
   }
 });
 busy();
@@ -165,6 +173,19 @@ setInterval(() => {
 }
 
 describe('Grok first terminal readiness without a terminal client', () => {
+  it.each(['fast-terminal', 'fast-failed'] as const)('releases the next queued input when a native turn completes before submit verification returns (%s)', async order => {
+    const f = await startFixture(order);
+    f.finish(1);
+    await f.wait(() => f.terminalCount('turn_initial') === 1, 'initial terminal');
+    await f.delay(3_000);
+    f.send('fast first input', 'turn_fast');
+    f.send('next queued input', 'turn_next');
+    await f.wait(() => f.terminalCount('turn_fast') === 1, 'fast native terminal');
+    await f.wait(() => f.writes().length === 2, 'next input after the submission mutex is released', 8_000);
+    expect(f.writes()).toEqual(['fast first input', 'next queued input']);
+    expect(f.terminalCount('turn_fast')).toBe(1);
+  }, 25_000);
+
   it('requests a terminal-owned tmux redraw and releases two queued inputs in separate completed turns without attach', async () => {
     const f = await startFixture('redraw-only', 'tmux');
     f.send('follow-up one', 'turn_one');
