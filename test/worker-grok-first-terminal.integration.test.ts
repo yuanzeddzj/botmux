@@ -88,7 +88,9 @@ process.stdin.on('data', bytes => {
     if (!body) continue;
     const writes = JSON.parse(fs.readFileSync(writesPath,'utf8'));
     writes.push(body); fs.writeFileSync(writesPath,JSON.stringify(writes));
-    fs.appendFileSync(history,JSON.stringify({session_id:sid,prompt:body,is_bash:false})+'\\n');
+    const receipt = () => fs.appendFileSync(history,JSON.stringify({session_id:sid,prompt:body,is_bash:false})+'\\n');
+    if (order === 'fast-terminal' || order === 'fast-failed') setTimeout(receipt, 5_000);
+    else receipt();
     start(body);
     if (order === 'fast-terminal' || order === 'fast-failed') {
       const completedTurn = turn;

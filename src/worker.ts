@@ -7414,6 +7414,12 @@ let activeRuntimePublished = false;
 let publishedAutoModelVariant: 'standard' | 'max' | null | undefined;
 let publishedAutoModelStateKey: string | undefined;
 const codexBridgeQueue = new CodexBridgeQueue(Date.now, notifyTerminalTurnStarted);
+// An owned transcript user record proves consumption even if the separate
+// prompt-history receipt appears after adapter verification has returned.
+const grokConsumedInputs = new Set<string>();
+function grokConsumedInputKey(generation: number, turnId: string, dispatchAttempt?: number): string {
+  return `${generation}:${turnId}:${dispatchAttempt ?? ''}`;
+}
 // Structured rollout CoT: Codex/Pi messages and TraeX history mutations emit
 // rollout reasoning/tool events attributed to the collecting turn, feeding
 // the same thinking channel as Claude's transcript attribution. The observer
@@ -7426,7 +7432,12 @@ codexBridgeQueue.setCotObserver((entries, turn) => {
 // Same evidence for the structured bridges (Pi, TraeX, Grok, …): the turn's
 // own user record is in the CLI's transcript.
 codexBridgeQueue.setTurnStartObserver((turn) => {
-  if (!turn.isLocal) inflightInputs.onTurnStarted(turn.turnId);
+  if (!turn.isLocal) {
+    inflightInputs.onTurnStarted(turn.turnId);
+    if (lastInitConfig?.cliId === 'grok') {
+      rememberBounded(grokConsumedInputs, grokConsumedInputKey(cliSpawnGeneration, turn.turnId, turn.dispatchAttempt));
+    }
+  }
 });
 codexBridgeQueue.setCotSupersededObserver((turn) => {
   if (!sessionId || turn.isLocal) return;
@@ -11530,6 +11541,7 @@ function codexBridgeIngest(opts: {
     if (turns.some(turn => turn.started && turn.finalText === undefined)) {
       // A queued, fingerprint-matched successor has actually started. Busy
       // output now belongs to live work, not the preceding completed turn.
+      if (postTerminalInputFence) log('Post-terminal composer check retired because a native successor started');
       postTerminalInputFence = null;
     } else if (turns.some(turn => turn.started && turn.finalText !== undefined)) {
       armPostTerminalInputFence(turns.filter(turn => turn.started && turn.finalText !== undefined).at(-1));
@@ -16213,7 +16225,7 @@ function armPostTerminalInputFence(terminalTurn?: { turnId: string; dispatchAtte
     bridgePath: codexBridgeRolloutPath,
     ...(terminalTurn ? { terminalTurn: { turnId: terminalTurn.turnId, dispatchAttempt: terminalTurn.dispatchAttempt } } : {}),
     webInputGeneration: webTerminalInputGeneration, armedAtMs: Date.now() };
-  log(`${cliName()} post-terminal composer check armed (matched terminal=${!!terminalTurn})`);
+  log(`${cliName()} post-terminal composer check armed (matched terminal=${!!terminalTurn}, restarting=${cliRestartInProgress})`);
   const revokedPublishedReady = isPromptReady;
   isPromptReady = false;
   // The composer can redraw and go quiet BEFORE the terminal reaches the
@@ -16226,7 +16238,13 @@ function armPostTerminalInputFence(terminalTurn?: { turnId: string; dispatchAtte
 }
 
 const postTerminalRecheck = createPostTerminalRecheck<PostTerminalInputFence>({
-  isCurrent: fence => currentPostTerminalInputFence() === fence && !cliRestartInProgress,
+  isCurrent: fence => {
+    const sameFence = currentPostTerminalInputFence() === fence;
+    if (!sameFence || cliRestartInProgress) {
+      log(`${cliName()} post-terminal composer check retired (same fence=${sameFence}, restarting=${cliRestartInProgress})`);
+    }
+    return sameFence && !cliRestartInProgress;
+  },
   probe: async (fence, isCurrent) => {
     await renderer?.writeAndFlush('');
     if (!isCurrent()) return;
@@ -18505,6 +18523,8 @@ async function flushPending(): Promise<void> {
   if (!isPromptReady && !typeAheadAllowed) return;
 
   isFlushing = true;
+  const flushBackend = backend;
+  const flushGeneration = cliSpawnGeneration;
   const promptReadyAtFlushStart = isPromptReady;
   let itemsWrittenInThisFlush = 0;
   const codexAppPromptReplay = new CodexAppFlushPromptReplay();
@@ -19079,6 +19099,15 @@ async function flushPending(): Promise<void> {
           handleStaleWriteContinuation('write_generation_changed');
           break;
         }
+        if (lastInitConfig?.cliId === 'grok' && item.turnId
+          && result?.submitted === false && !result.failureReason && !recoveryFailureReason
+          && grokConsumedInputs.has(grokConsumedInputKey(writeGeneration, item.turnId, item.dispatchAttempt))) {
+          // The fingerprint-matched native user record belongs to THIS write
+          // generation and attempt. Never quarantine a turn the CLI already
+          // consumed merely because its prompt-history mirror was delayed.
+          result = { ...result, submitted: true };
+          log('Grok native user record confirmed input consumption before the delayed prompt-history receipt');
+        }
         // Transcript-backed CLIs (Grok/Codex/… reliableTurnTerminal) own idle via
         // assistant_final → fireIdle. Their busyPattern is often missing for
         // several seconds after submit (or never matches the current TUI chrome),
@@ -19455,6 +19484,16 @@ async function flushPending(): Promise<void> {
     }
   } finally {
     isFlushing = false;
+    if (lastInitConfig?.cliId === 'grok' && itemsWrittenInThisFlush > 0
+      && isPromptReady && pendingMessages.length > 0 && !hasStructuredLifecycleBlock()) {
+      // A terminal/composer edge can arrive while writeInput awaits its
+      // receipt. Its flush call was rejected by the mutex; retry the normal
+      // admission point once the mutex is released, never force input ready.
+      queueMicrotask(() => {
+        if (backend === flushBackend && cliSpawnGeneration === flushGeneration
+          && isPromptReady && !cliRestartInProgress) void flushPending();
+      });
+    }
     // A prompt can arrive after turn N completes but before turn N+1's chunked
     // control line finishes. We reject it while N+1 has a liveness slot. If that
     // write then fails, the prompt is still the runner's real ready boundary;
