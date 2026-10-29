@@ -200,9 +200,24 @@ if (startDaemon) {
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed)) {
         let changed = false;
+        const { sandboxSecretPaths } = await import('../test/helpers/mock-llm-server/sandbox-probe.js');
+        const { mkdtempSync } = await import('node:fs');
+        const { tmpdir } = await import('node:os');
         for (const b of parsed) {
+          const sandboxed = b.sandbox !== undefined && b.sandbox !== false && b.sandbox !== 'off';
           if (!b.workingDir || !existsSync(b.workingDir)) {
-            b.workingDir = '.';
+            // A sandboxed bot gets the working directory read-write: never the
+            // checkout, which holds this config and the Feishu login state.
+            b.workingDir = sandboxed ? mkdtempSync(join(tmpdir(), 'botmux-sbx-work-')) : '.';
+            changed = true;
+          }
+          if (sandboxed) {
+            // The sandbox mounts the botmux checkout read-only, which would
+            // expose every test bot's secret and the login cookies.
+            const { bots, state } = sandboxSecretPaths();
+            const deny = new Set<string>(b.sandboxPaths?.deny ?? []);
+            for (const secret of [bots, state, join(process.cwd(), '.env')]) if (existsSync(secret)) deny.add(secret);
+            b.sandboxPaths = { ...(b.sandboxPaths ?? {}), deny: [...deny] };
             changed = true;
           }
           if (b.p2pMode !== 'thread') {
