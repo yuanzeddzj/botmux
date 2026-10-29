@@ -16312,7 +16312,16 @@ async function postTerminalInputIsBlocked(target: SessionBackend): Promise<boole
   if (backend !== target || fence.generation !== cliSpawnGeneration
     || cliRestartInProgress) return true;
   if (!currentPostTerminalInputFence()) return false;
-  return postTerminalPromptFenceHolds('external', target);
+  if (postTerminalPromptFenceHolds('external', target)) return true;
+  // Input admission can be the first observer of a newly rendered composer.
+  // The check above then clears this exact terminal fence, but no PTY edge is
+  // guaranteed to follow and the scheduled recheck retires with no owner. Run
+  // the normal readiness gate in the same synchronous ownership window; if a
+  // successor/restart/lifecycle guard rejects it, keep the input blocked.
+  if (currentPostTerminalInputFence()) return true;
+  log(`${cliName()} post-terminal composer verified during input admission`);
+  markPromptReady();
+  return !isPromptReady;
 }
 
 function currentInputDeliveryQuarantine(): InputDeliveryQuarantine | null {

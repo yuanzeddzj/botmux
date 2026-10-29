@@ -25,7 +25,7 @@ afterEach(async () => {
   root = undefined;
 });
 
-async function startFixture(order: 'composer-first' | 'terminal-first' | 'no-terminal' | 'failed-terminal' | 'redraw-only' | 'fast-terminal' | 'fast-failed', backendType: 'pty' | 'tmux' = 'pty') {
+async function startFixture(order: 'composer-first' | 'terminal-first' | 'input-probe-race' | 'no-terminal' | 'failed-terminal' | 'redraw-only' | 'fast-terminal' | 'fast-failed', backendType: 'pty' | 'tmux' = 'pty') {
   root = mkdtempSync(join(tmpdir(), 'botmux-first-terminal-test-'));
   const data = join(root, 'data');
   const grokHome = join(root, '.grok');
@@ -55,7 +55,7 @@ const history = ${JSON.stringify(join(grokHome, 'sessions', encodeURIComponent(d
 const finish = ${JSON.stringify(finish)}, release = ${JSON.stringify(release)}, begin = ${JSON.stringify(begin)};
 const foreign = ${JSON.stringify(foreign)}, replay = ${JSON.stringify(replay)};
 const sid = ${JSON.stringify(sid)}, order = ${JSON.stringify(order)};
-let begun = false, finished = 0, requested = 0, turn = 0, input = '', tick = 0, terminalRecord;
+let begun = false, finished = 0, requested = 0, turn = 0, input = '', tick = 0, terminalRecord, keepComposerActive = false;
 function update(value) {
   const record = { timestamp: Date.now(), method: 'session/update', params: {sessionId: sid, update: value} };
   if (value.sessionUpdate === 'turn_completed') {
@@ -108,7 +108,7 @@ setInterval(() => {
   const next = fs.existsSync(finish) ? Number(fs.readFileSync(finish,'utf8')) : 0;
   if (begun && next > requested) {
     requested = next;
-    if (order === 'redraw-only' || (order === 'terminal-first' && next === 1)) {
+    if (order === 'redraw-only' || ((order === 'terminal-first' || order === 'input-probe-race') && next === 1)) {
       update({sessionUpdate:'turn_completed',stop_reason:'end_turn'});
     } else {
       composer();
@@ -118,8 +118,10 @@ setInterval(() => {
     }
     finished = next;
   }
-  if (order === 'terminal-first' && requested === 1 && fs.existsSync(release)) {
-    composer(); fs.unlinkSync(release);
+  if ((order === 'terminal-first' || order === 'input-probe-race') && requested === 1 && fs.existsSync(release)) {
+    composer();
+    keepComposerActive = order === 'input-probe-race';
+    fs.unlinkSync(release);
   }
   if (fs.existsSync(foreign)) {
     fs.appendFileSync(transcript, JSON.stringify({timestamp:Date.now(),method:'session/update',params:{sessionId:'foreign-session',update:{sessionUpdate:'turn_completed',stop_reason:'end_turn'}}})+'\\n');
@@ -130,6 +132,9 @@ setInterval(() => {
     const duplicate = {...terminalRecord, timestamp:Date.now(), params:{...terminalRecord.params, _meta:{eventId:'retry-terminal-' + turn}}};
     fs.appendFileSync(transcript,JSON.stringify(duplicate)+'\\n'); fs.unlinkSync(replay);
   }
+  // Keep the PTY non-quiescent without changing the rendered composer. This
+  // makes input admission, not a later idle edge, the first verifier.
+  if (keepComposerActive) process.stdout.write('\\x1b[?25h');
   if (begun && finished < turn) busy();
 },100);
 `);
@@ -165,6 +170,7 @@ setInterval(() => {
   writeFileSync(begin, '1');
   await wait(() => messages.some(m => m.type === 'thinking_update'), 'initial turn started');
   return { wait, send, writes, terminalCount, messages,
+    rename: (title: string) => child!.send({type:'rename_session',title} satisfies DaemonToWorker),
     redraws: (): Array<{turn: number; completed: boolean}> => JSON.parse(readFileSync(redrawsPath, 'utf8')),
     finish: (n: number) => writeFileSync(finish, String(n)),
     release: () => writeFileSync(release, '1'),
@@ -175,6 +181,17 @@ setInterval(() => {
 }
 
 describe('Grok first terminal readiness without a terminal client', () => {
+  it('restores prompt-ready when an input-admission probe clears the terminal fence before its recheck', async () => {
+    const f = await startFixture('input-probe-race');
+    f.finish(1);
+    await f.wait(() => f.terminalCount('turn_initial') === 1, 'initial terminal');
+    f.release();
+    await f.delay(500);
+    f.rename('raced terminal fence');
+    await f.wait(() => f.writes().length === 1, 'rename after the input-admission composer check', 6_000);
+    expect(f.writes()).toEqual(['/rename raced terminal fence']);
+  }, 20_000);
+
   it.each(['fast-terminal', 'fast-failed'] as const)('releases the next queued input when a native turn completes before submit verification returns (%s)', async order => {
     const f = await startFixture(order);
     f.finish(1);
