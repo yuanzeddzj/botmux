@@ -55,6 +55,7 @@ let begun = false, finished = 0, requested = 0, turn = 0, input = '', tick = 0, 
 function update(value) {
   const record = { timestamp: Date.now(), method: 'session/update', params: {sessionId: sid, update: value} };
   if (value.sessionUpdate === 'turn_completed') {
+    value.prompt_id = 'native-turn-' + turn;
     record.params._meta = {eventId: 'terminal-' + turn};
     terminalRecord = record;
   }
@@ -106,7 +107,9 @@ setInterval(() => {
     fs.unlinkSync(foreign);
   }
   if (terminalRecord && fs.existsSync(replay)) {
-    fs.appendFileSync(transcript,JSON.stringify(terminalRecord)+'\\n'); fs.unlinkSync(replay);
+    // A late retry may carry a new transport event id for the SAME native turn.
+    const duplicate = {...terminalRecord, timestamp:Date.now(), params:{...terminalRecord.params, _meta:{eventId:'retry-terminal-' + turn}}};
+    fs.appendFileSync(transcript,JSON.stringify(duplicate)+'\\n'); fs.unlinkSync(replay);
   }
   if (begun && finished < turn) busy();
 },100);
@@ -166,6 +169,7 @@ describe('Grok first terminal readiness without a terminal client', () => {
     await f.delay(1_000);
     expect(f.writes()).toEqual(['follow-up one']);
     expect(f.terminalCount('turn_initial')).toBe(1);
+    expect(f.terminalCount('turn_one')).toBe(0);
     f.finish(2);
     await f.wait(() => f.writes().length === 2, 'second follow-up admitted');
     expect(f.writes()).toEqual(['follow-up one', 'follow-up two']);

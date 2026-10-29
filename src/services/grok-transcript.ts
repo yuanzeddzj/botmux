@@ -424,6 +424,10 @@ export function drainGrokUpdates(
         kind: 'assistant_final',
         text: finalText,
         sourceSessionId: sessionId ?? openTurnSessionId,
+        // Transport retries can have a new event id and timestamp. Preserve
+        // Grok's native prompt identity so a closed turn cannot settle its successor.
+        ...(typeof update.prompt_id === 'string' && update.prompt_id
+          ? { sourceTurnId: update.prompt_id } : {}),
         ...outcome,
       });
       openTurnSessionId = undefined;
