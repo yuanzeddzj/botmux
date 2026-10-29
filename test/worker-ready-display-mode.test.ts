@@ -275,6 +275,25 @@ describe('Worker ready: set_display_mode re-sync', () => {
     setActiveSessionsRegistry(new Map());
   });
 
+  it.each(['grok', 'traex'])('publishes %s public process and command activity in legacy replies without /cot show', async cliId => {
+    getBotMock.mockReturnValue({ config: { larkAppId: 'app_test', cliId, cotEnabled: true, disableStreamingCard: true } });
+    cotRequest.mockReset().mockImplementation(async () => ({ code: 0, data: { cot_id: 'cot_public', message_id: 'om_cot_public' } }));
+    const worker = makeFakeWorker();
+    const ds = makeDs({ worker, workerReady: true, workerPort: 9999,
+      session: { ...makeDs().session, cliId } });
+    setupActiveWorkerHandlers(ds, worker);
+    worker.emit('message', { type: 'thinking_update', sessionId: ds.session.sessionId,
+      turnId: 'om_public', entries: [
+        { kind: 'text', text: 'Checking the project configuration.' },
+        { kind: 'tool_call', id: 'call_public', name: 'shell', args: 'pwd' },
+        { kind: 'tool_result', id: 'call_public', result: '/fixture/project' },
+      ] });
+    await vi.waitFor(() => expect(cotRequest.mock.calls.filter(([r]) => r.method === 'POST')).toHaveLength(1));
+    expect(ds.lastThinkingUpdate?.entries).toHaveLength(3);
+    abortCotMessage(ds, 'om_public');
+    await flush();
+  });
+
   it.each(['ready', 'screen_update', 'fallback'].flatMap(source => ['publish', 'stop', 'replace'].map(outcome => ({ source, outcome }))))(
     '$source registers the actual first card POST before CoT publication ($outcome)', async ({ source, outcome }) => {
       getBotMock.mockReturnValue({ config: { larkAppId: 'app_test', cliId: 'claude-code', cotEnabled: true } });

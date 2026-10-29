@@ -1088,6 +1088,23 @@ export class TmuxPipeBackend implements SessionBackend {
     }
   }
 
+  async requestRedraw(isCurrent: () => boolean): Promise<boolean> {
+    if (!this.ownsSession || this.exited || !isCurrent()) return false;
+    const original = this.getPaneSize();
+    if (!original || original.rows < 3 || !isCurrent()) return false;
+    const resizedRows = original.rows - 1;
+    // Ink may coalesce two immediate resize events. Let the payload observe
+    // the smaller grid before restoring it, with no paste/Enter/control input.
+    this.resize(original.cols, resizedRows);
+    await new Promise<void>(resolve => setTimeout(resolve, 75));
+    if (this.exited || !isCurrent()) return false;
+    const current = this.getPaneSize();
+    // A user resize owns the newer geometry; never overwrite it on restore.
+    if (!current || current.cols !== original.cols || current.rows !== resizedRows) return false;
+    this.resize(original.cols, original.rows);
+    return true;
+  }
+
   onData(cb: (data: string) => void): void {
     this.dataCbs.push(cb);
   }

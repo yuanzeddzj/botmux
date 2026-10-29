@@ -11532,7 +11532,7 @@ function codexBridgeIngest(opts: {
       // output now belongs to live work, not the preceding completed turn.
       postTerminalInputFence = null;
     } else if (turns.some(turn => turn.started && turn.finalText !== undefined)) {
-      armPostTerminalInputFence();
+      armPostTerminalInputFence(turns.filter(turn => turn.started && turn.finalText !== undefined).at(-1));
     }
   }
   // After ingest so the latch's delivery re-kick observes the started turn —
@@ -16179,6 +16179,10 @@ interface PostTerminalInputFence {
   generation: number;
   cliSessionId?: string;
   bridgePath?: string;
+  terminalTurn?: { turnId: string; dispatchAttempt?: number };
+  webInputGeneration: number;
+  armedAtMs: number;
+  redrawRequested?: boolean;
 }
 let postTerminalInputFence: PostTerminalInputFence | null = null;
 
@@ -16188,22 +16192,28 @@ function currentPostTerminalInputFence(): typeof postTerminalInputFence {
       || postTerminalInputFence.generation !== cliSpawnGeneration
       || postTerminalInputFence.cliSessionId !== (lastSpawnEffectiveCliSessionId ?? lastInitConfig?.cliSessionId)
       || postTerminalInputFence.bridgePath !== codexBridgeRolloutPath)) {
+    log('Post-terminal composer check retired because the backend, generation, native session or transcript changed');
     postTerminalInputFence = null;
     postTerminalRecheck.cancel();
   }
   return postTerminalInputFence;
 }
 
-function armPostTerminalInputFence(): void {
+function armPostTerminalInputFence(terminalTurn?: { turnId: string; dispatchAttempt?: number }): void {
   if (cliAdapter?.postTerminalPromptFence !== true || !backend
     || !backendScreenEvidenceIsAuthoritativeForMutation()) return;
-  if (currentPostTerminalInputFence()) {
+  const existing = currentPostTerminalInputFence();
+  if (existing) {
+    if (terminalTurn) existing.terminalTurn = { turnId: terminalTurn.turnId, dispatchAttempt: terminalTurn.dispatchAttempt };
     schedulePostTerminalFenceRecheck('held terminal input fence');
     return;
   }
   postTerminalInputFence = { backend, generation: cliSpawnGeneration,
     cliSessionId: lastSpawnEffectiveCliSessionId ?? lastInitConfig?.cliSessionId,
-    bridgePath: codexBridgeRolloutPath };
+    bridgePath: codexBridgeRolloutPath,
+    ...(terminalTurn ? { terminalTurn: { turnId: terminalTurn.turnId, dispatchAttempt: terminalTurn.dispatchAttempt } } : {}),
+    webInputGeneration: webTerminalInputGeneration, armedAtMs: Date.now() };
+  log(`${cliName()} post-terminal composer check armed (matched terminal=${!!terminalTurn})`);
   const revokedPublishedReady = isPromptReady;
   isPromptReady = false;
   // The composer can redraw and go quiet BEFORE the terminal reaches the
@@ -16224,7 +16234,26 @@ const postTerminalRecheck = createPostTerminalRecheck<PostTerminalInputFence>({
     if (bridgeJsonlPath) bridgeDrainAndMaybeEmit();
     if (codexBridgeFallbackActive()) codexBridgeDrainAndMaybeEmit({ signalIdle: false });
     if (!isCurrent()) return;
-    if (postTerminalPromptFenceHolds('external', target)) return;
+    if (postTerminalPromptFenceHolds('external', target)) {
+      // A quiet native TUI can retain its busy frame until SIGWINCH. Polling
+      // that frame alone cannot repair it. Only THIS matched terminal may ask
+      // an owned tmux pane to repaint; the fence still owns input admission.
+      if (isCurrent() && cliAdapter?.id === 'grok' && fence.terminalTurn
+        && !fence.redrawRequested && Date.now() - fence.armedAtMs >= 3_500
+        && fence.webInputGeneration === webTerminalInputGeneration
+        && !inflightInputs.hasUnacked() && !hasStructuredLifecycleBlock()
+        && !isFlushing && !commandLineWritesPending && wsClients.size === 0
+        && target.requestRedraw) {
+        fence.redrawRequested = true;
+        const ownsRedraw = () => isCurrent()
+          && fence.webInputGeneration === webTerminalInputGeneration
+          && !hasStructuredLifecycleBlock() && !inflightInputs.hasUnacked()
+          && !isFlushing && !commandLineWritesPending && wsClients.size === 0;
+        const repainted = await target.requestRedraw(ownsRedraw);
+        if (isCurrent()) log(`${cliName()} post-terminal redraw ${repainted ? 'requested' : 'not applied'}; input remains fenced until composer verification`);
+      }
+      return;
+    }
     // No await after the final ownership check: clearing the fence and asking
     // the normal readiness gate to admit input is one synchronous transition.
     log(`${cliName()} post-terminal composer verified on static screen`);

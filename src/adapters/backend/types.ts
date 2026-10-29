@@ -316,6 +316,9 @@ export interface SessionBackend {
     fence: number,
   ): AmbiguousSubmissionRecoveryFailure | undefined;
   resize(cols: number, rows: number): void;
+  /** Repaint an owned terminal without typing input. The caller retains a
+   * verified terminal lease; reject before every mutation if it changed. */
+  requestRedraw?(isCurrent: () => boolean): Promise<boolean>;
   onData(cb: (data: string) => void): void;
   /**
    * Replace the worker's derived screen state with an authoritative snapshot.

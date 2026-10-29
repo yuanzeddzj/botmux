@@ -25,7 +25,7 @@ afterEach(async () => {
   root = undefined;
 });
 
-async function startFixture(order: 'composer-first' | 'terminal-first' | 'no-terminal' | 'failed-terminal') {
+async function startFixture(order: 'composer-first' | 'terminal-first' | 'no-terminal' | 'failed-terminal' | 'redraw-only', backendType: 'pty' | 'tmux' = 'pty') {
   root = mkdtempSync(join(tmpdir(), 'botmux-first-terminal-test-'));
   const data = join(root, 'data');
   const grokHome = join(root, '.grok');
@@ -33,6 +33,7 @@ async function startFixture(order: 'composer-first' | 'terminal-first' | 'no-ter
   const sessionDir = join(grokHome, 'sessions', encodeURIComponent(data), sid);
   const transcript = join(sessionDir, 'updates.jsonl');
   const writesPath = join(root, 'writes.json');
+  const redrawsPath = join(root, 'redraws.json');
   const finish = join(root, 'finish');
   const release = join(root, 'release');
   const begin = join(root, 'begin');
@@ -43,10 +44,13 @@ async function startFixture(order: 'composer-first' | 'terminal-first' | 'no-ter
   mkdirSync(data, { recursive: true });
   writeFileSync(transcript, '');
   writeFileSync(writesPath, '[]');
+  writeFileSync(redrawsPath, '[]');
+  writeFileSync(join(root, '.zshrc'), '# isolated fixture\n');
   writeFileSync(fake, `#!/usr/bin/env node
 const fs = require('node:fs');
 const transcript = ${JSON.stringify(transcript)};
 const writesPath = ${JSON.stringify(writesPath)};
+const redrawsPath = ${JSON.stringify(redrawsPath)};
 const history = ${JSON.stringify(join(grokHome, 'sessions', encodeURIComponent(data), 'prompt_history.jsonl'))};
 const finish = ${JSON.stringify(finish)}, release = ${JSON.stringify(release)}, begin = ${JSON.stringify(begin)};
 const foreign = ${JSON.stringify(foreign)}, replay = ${JSON.stringify(replay)};
@@ -63,6 +67,11 @@ function update(value) {
 }
 function composer() { process.stdout.write('\\x1b[2J\\x1b[H❯\\nShift+Tab:mode | Ctrl+x:shortcuts\\n'); }
 function busy() { process.stdout.write('\\x1b[2J\\x1b[HWaiting for response ' + (++tick) + '\\nCtrl+c:cancel\\n'); }
+process.on('SIGWINCH', () => {
+  const redraws = JSON.parse(fs.readFileSync(redrawsPath, 'utf8'));
+  redraws.push({turn, completed:finished >= turn}); fs.writeFileSync(redrawsPath, JSON.stringify(redraws));
+  if (order === 'redraw-only' && finished >= turn) composer();
+});
 function start(body) {
   turn++;
   update({ sessionUpdate: 'user_message_chunk', content: {type:'text',text:body} });
@@ -89,7 +98,7 @@ setInterval(() => {
   const next = fs.existsSync(finish) ? Number(fs.readFileSync(finish,'utf8')) : 0;
   if (begun && next > requested) {
     requested = next;
-    if (order === 'terminal-first' && next === 1) {
+    if (order === 'redraw-only' || (order === 'terminal-first' && next === 1)) {
       update({sessionUpdate:'turn_completed',stop_reason:'end_turn'});
     } else {
       composer();
@@ -120,7 +129,7 @@ setInterval(() => {
   child = spawnNodeTsScript(resolve('src/worker.ts'), [], {
     cwd: resolve('.'),
     env: { ...process.env, HOME: root, GROK_HOME: grokHome, SESSION_DATA_DIR: data,
-      BOTMUX_SESSION_ID: sid, BOTMUX_COORDINATION_MODE: 'disabled',
+      BOTMUX_SESSION_ID: sid, BOTMUX_COORDINATION_MODE: 'disabled', BOTMUX_TMUX_SOCKET: `grok-readiness-${sid}`,
       LARK_APP_ID: 'app_test', LARK_APP_SECRET: 'test-only' },
     stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
   });
@@ -140,12 +149,13 @@ setInterval(() => {
   const terminalCount = (turnId: string) => messages.filter(m => m.type === 'turn_terminal' && m.turnId === turnId).length;
   child.send({ type: 'init', sessionId: sid, chatId: 'oc_test', rootMessageId: 'om_test',
     workingDir: data, cliId: 'grok', cliPathOverride: fake, cliSessionId: sid,
-    backendType: 'pty', prompt: 'initial turn', turnId: 'turn_initial',
+    backendType, prompt: 'initial turn', turnId: 'turn_initial',
     larkAppId: 'app_test', larkAppSecret: 'test-only' } satisfies DaemonToWorker);
   await wait(() => logs.includes('publishing projected working before first prompt'), 'worker started');
   writeFileSync(begin, '1');
   await wait(() => messages.some(m => m.type === 'thinking_update'), 'initial turn started');
   return { wait, send, writes, terminalCount, messages,
+    redraws: (): Array<{turn: number; completed: boolean}> => JSON.parse(readFileSync(redrawsPath, 'utf8')),
     finish: (n: number) => writeFileSync(finish, String(n)),
     release: () => writeFileSync(release, '1'),
     foreign: () => writeFileSync(foreign, '1'),
@@ -155,6 +165,28 @@ setInterval(() => {
 }
 
 describe('Grok first terminal readiness without a terminal client', () => {
+  it('requests a terminal-owned tmux redraw and releases two queued inputs in separate completed turns without attach', async () => {
+    const f = await startFixture('redraw-only', 'tmux');
+    f.send('follow-up one', 'turn_one');
+    f.send('follow-up two', 'turn_two');
+    await f.delay(4_000);
+    expect(f.writes()).toEqual([]);
+    expect(f.redraws()).toEqual([]);
+    f.finish(1);
+    await f.wait(() => f.writes().length === 1, 'first queued input after terminal redraw', 12_000);
+    expect(f.writes()).toEqual(['follow-up one']);
+    f.replay();
+    await f.delay(4_000);
+    expect(f.writes()).toEqual(['follow-up one']);
+    f.finish(2);
+    await f.wait(() => f.writes().length === 2, 'second queued input after its terminal redraw', 12_000);
+    expect(f.writes()).toEqual(['follow-up one', 'follow-up two']);
+    expect(f.redraws().length).toBeGreaterThan(0);
+    expect(f.redraws().every(row => row.completed)).toBe(true);
+    expect(f.terminalCount('turn_initial')).toBe(1);
+    expect(f.terminalCount('turn_one')).toBe(1);
+  }, 45_000);
+
   it('keeps the initial terminal settled when the composer is rendered first, then releases successors one at a time', async () => {
     const f = await startFixture('composer-first');
     f.finish(1);

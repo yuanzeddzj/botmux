@@ -17040,11 +17040,7 @@ function setupWorkerHandlers(
           }
           break;
         }
-        // Grok public activity is enabled for dynamic replies. Preserve its
-        // legacy message layout unless the user explicitly requests /cot show.
-        if (effectiveCliId !== 'grok' || ds.cotForced) {
-          handleCotThinkingUpdate(ds, msg);
-        }
+        handleCotThinkingUpdate(ds, msg);
         break;
       }
 

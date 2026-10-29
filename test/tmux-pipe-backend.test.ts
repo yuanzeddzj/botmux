@@ -160,6 +160,37 @@ beforeEach(() => {
   resetTmuxVersionCacheForTests();
 });
 
+describe('TmuxPipeBackend terminal redraw lease', () => {
+  it('repaints an owned pane and restores its grid without sending input', async () => {
+    const be = new TmuxPipeBackend('bmx-redraw', { ownsSession: true });
+    vi.spyOn(be, 'getPaneSize').mockReturnValueOnce({ cols: 160, rows: 50 }).mockReturnValueOnce({ cols: 160, rows: 49 });
+    const resize = vi.spyOn(be, 'resize').mockImplementation(() => {});
+    const write = vi.spyOn(be, 'write');
+    expect(await be.requestRedraw(() => true)).toBe(true);
+    expect(resize.mock.calls).toEqual([[160, 49], [160, 50]]);
+    expect(write).not.toHaveBeenCalled();
+  });
+
+  it.each(['expired', 'adopted', 'user-resize'])('preserves the newer owner or user geometry (%s)', async scenario => {
+    const be = new TmuxPipeBackend('bmx-redraw', { ownsSession: scenario !== 'adopted' });
+    let valid = scenario !== 'expired';
+    vi.spyOn(be, 'getPaneSize').mockReturnValueOnce({ cols: 160, rows: 50 }).mockReturnValueOnce({ cols: 200, rows: 60 });
+    const resize = vi.spyOn(be, 'resize').mockImplementation(() => {});
+    expect(await be.requestRedraw(() => valid)).toBe(false);
+    expect(resize.mock.calls).toEqual(scenario === 'user-resize' ? [[160, 49]] : []);
+    valid = false;
+  });
+
+  it('does not restore through a lease revoked while the CLI observes resize', async () => {
+    const be = new TmuxPipeBackend('bmx-redraw', { ownsSession: true });
+    let valid = true;
+    vi.spyOn(be, 'getPaneSize').mockReturnValue({ cols: 160, rows: 50 });
+    const resize = vi.spyOn(be, 'resize').mockImplementation(() => { valid = false; });
+    expect(await be.requestRedraw(() => valid)).toBe(false);
+    expect(resize.mock.calls).toEqual([[160, 49]]);
+  });
+});
+
 describe('TmuxPipeBackend.spawn', () => {
   it.each([
     { status: 1, stderr: Buffer.from('mkfifo: No space left on device') },
