@@ -175,7 +175,9 @@ export function createGrokAdapter(pathOverride?: string): CliAdapter {
     get authPaths(): readonly string[] { return [grokHome()]; },
     get resolvedBin(): string { return (cachedBin ??= resolveCommand(rawBin)); },
 
-    supportsTypeAhead: true,
+    // Keep follow-ups in BotMux until the predecessor's terminal and writable composer.
+    supportsTypeAhead: false,
+    postTerminalPromptFence: true,
     // updates.jsonl provides a session-scoped, explicit `turn_completed`
     // boundary. The bridge preserves empty finals and maps error/cancelled
     // stop reasons, so meeting delivery never relies on prompt-looking screen

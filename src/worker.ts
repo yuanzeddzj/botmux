@@ -108,6 +108,7 @@ import {
 } from './services/restart-interruption.js';
 import { isUnsentInputReplayable, saveUnsentInputs, settleTakenUnsentInputs, takeUnsentInputs } from './services/unsent-input-journal.js';
 import { createTranscriptTerminalSettle, type TranscriptTerminalSettle } from './services/transcript-terminal-settle.js';
+import { createPostTerminalRecheck } from './services/post-terminal-recheck.js';
 import { attributableBridgeReplyMarkers, bridgeGateInputForTurn, bridgePostText, composeFailedBridgeFallbackContent, hasTrailingBridgeSentinelLine, isBridgeNothingToSendFinal, shouldSuppressBridgeEmit, shouldSuppressStructuredFallback, structuredFallbackKind, stripTrailingBridgeSentinelLine, type BridgeSendMarker } from './services/bridge-fallback-gate.js';
 import { buildSubmitMessagePreview } from './services/submit-notification.js';
 import {
@@ -2630,6 +2631,31 @@ let lastSpawnCodexExecutable: string | undefined;
  * for Riff/queue-after-spawn and for quiescence-only argv adapters.
  */
 let spawnArgvInitialPromptBusy = false;
+/** Identity of THIS spawn's argv turn, retained until its matched terminal is observed.
+ * A screen-only startup ready edge may consume the busy arm before this terminal. */
+let spawnArgvInitialTurn: {
+  generation: number;
+  cliSessionId?: string;
+  turnId?: string;
+  dispatchAttempt?: number;
+} | null = null;
+
+function observeSpawnArgvInitialTerminal(turns: readonly CodexPendingTurn[]): void {
+  const owner = spawnArgvInitialTurn;
+  if (!owner || owner.generation !== cliSpawnGeneration) return;
+  const currentCliSid = lastSpawnEffectiveCliSessionId ?? lastInitConfig?.cliSessionId;
+  if (owner.cliSessionId && currentCliSid && owner.cliSessionId !== currentCliSid) return;
+  const matched = turns.some(turn => turn.started && turn.finalText !== undefined
+    && !turn.isLocal && owner.turnId !== undefined && turn.turnId === owner.turnId
+    && turn.dispatchAttempt === owner.dispatchAttempt
+    && (!turn.sourceSessionId || !currentCliSid || turn.sourceSessionId === currentCliSid));
+  if (!matched) return;
+  // The bridge matched the actual user/terminal to this exact turn. Startup UI
+  // readiness must never overwrite that terminal with a synthetic working seed.
+  spawnArgvInitialTurn = null;
+  spawnArgvInitialPromptBusy = false;
+  spawnArgvNeedsWorkingSeed = false;
+}
 /**
  * True when spawn baked first prompt into argv (any such adapter, incl. Pi /
  * Gemini). Card-off reactions need a working→idle edge: Grok uses the busy
@@ -11497,6 +11523,7 @@ function codexBridgeIngest(opts: {
   }
   codexBridgeQueue.ingest(result.events);
   const hasAssistantFinal = result.events.some(event => event.kind === 'assistant_final');
+  observeSpawnArgvInitialTerminal(codexBridgeQueue.peek());
   observeStructuredBackgroundTasks(result);
   if (cliAdapter?.postTerminalPromptFence === true) {
     const turns = codexBridgeQueue.peek();
@@ -12223,6 +12250,8 @@ function drainReliableTerminalBeforeInterrupt(): void {
 
 function emitReadyCodexTurns(): void {
   const ready = codexBridgeQueue.drainEmittable();
+  // Recovery/buffer replay can settle a turn outside the ordinary ingest path.
+  observeSpawnArgvInitialTerminal(ready);
   checkpointCodexAdoptRecovery();
   checkpointStructuredBridgeRecovery();
   if (ready.length === 0) return;
@@ -16145,25 +16174,36 @@ const inputDeliveryEvidence = new InputDeliveryEvidenceTracker();
 /** A terminal is a logical completion, not a PTY write receipt. Install this
  * synchronously before async screen settlement so type-ahead cannot race the
  * idle callback. A real composer or a started native successor clears it. */
-let postTerminalInputFence: {
+interface PostTerminalInputFence {
   backend: SessionBackend;
   generation: number;
-} | null = null;
+  cliSessionId?: string;
+  bridgePath?: string;
+}
+let postTerminalInputFence: PostTerminalInputFence | null = null;
 
 function currentPostTerminalInputFence(): typeof postTerminalInputFence {
   if (postTerminalInputFence
     && (postTerminalInputFence.backend !== backend
-      || postTerminalInputFence.generation !== cliSpawnGeneration)) {
+      || postTerminalInputFence.generation !== cliSpawnGeneration
+      || postTerminalInputFence.cliSessionId !== (lastSpawnEffectiveCliSessionId ?? lastInitConfig?.cliSessionId)
+      || postTerminalInputFence.bridgePath !== codexBridgeRolloutPath)) {
     postTerminalInputFence = null;
+    postTerminalRecheck.cancel();
   }
   return postTerminalInputFence;
 }
 
 function armPostTerminalInputFence(): void {
   if (cliAdapter?.postTerminalPromptFence !== true || !backend
-    || !backendScreenEvidenceIsAuthoritativeForMutation()
-    || currentPostTerminalInputFence()) return;
-  postTerminalInputFence = { backend, generation: cliSpawnGeneration };
+    || !backendScreenEvidenceIsAuthoritativeForMutation()) return;
+  if (currentPostTerminalInputFence()) {
+    schedulePostTerminalFenceRecheck('held terminal input fence');
+    return;
+  }
+  postTerminalInputFence = { backend, generation: cliSpawnGeneration,
+    cliSessionId: lastSpawnEffectiveCliSessionId ?? lastInitConfig?.cliSessionId,
+    bridgePath: codexBridgeRolloutPath };
   const revokedPublishedReady = isPromptReady;
   isPromptReady = false;
   // The composer can redraw and go quiet BEFORE the terminal reaches the
@@ -16171,53 +16211,41 @@ function armPostTerminalInputFence(): void {
   // and the transcript's fireIdle() is a no-op, while the bridge poller only
   // emits while ready. With a static screen nothing would ever re-check the
   // fence — no terminal, no prompt-ready, every later message stranded.
-  if (revokedPublishedReady) schedulePostTerminalFenceRecheck('terminal after published prompt-ready');
+  schedulePostTerminalFenceRecheck(revokedPublishedReady
+    ? 'terminal after published prompt-ready' : 'terminal input fence');
 }
 
-let postTerminalFenceRecheckPending = false;
+const postTerminalRecheck = createPostTerminalRecheck<PostTerminalInputFence>({
+  isCurrent: fence => currentPostTerminalInputFence() === fence && !cliRestartInProgress,
+  probe: async (fence, isCurrent) => {
+    await renderer?.writeAndFlush('');
+    if (!isCurrent()) return;
+    const target = fence.backend;
+    if (bridgeJsonlPath) bridgeDrainAndMaybeEmit();
+    if (codexBridgeFallbackActive()) codexBridgeDrainAndMaybeEmit({ signalIdle: false });
+    if (!isCurrent()) return;
+    if (postTerminalPromptFenceHolds('external', target)) return;
+    // No await after the final ownership check: clearing the fence and asking
+    // the normal readiness gate to admit input is one synchronous transition.
+    log(`${cliName()} post-terminal composer verified on static screen`);
+    if (idleDetector && !idleDetector.isIdleNow()) {
+      idleDetector.fireIdle();
+      if (idleDetector.isIdleNow()) return;
+    }
+    markPromptReady();
+  },
+  onError: error => log(`${cliName()} post-terminal composer recheck failed: ${String(error)}`),
+  onWait: () => log(`${cliName()} structured terminal observed; still waiting for a verified writable composer; inputs remain queued`),
+});
 
 /** Re-evaluate the post-terminal fence against the current viewport without
  * waiting for new PTY output. Publishes the structured terminal first (same
  * order as the external-idle path), then releases prompt-ready only when the
- * settled screen shows a composer newer than any busy marker. A held fence
- * keeps the pre-existing contract: the next PTY redraw re-runs idle. */
-function schedulePostTerminalFenceRecheck(reason: string): void {
-  if (postTerminalFenceRecheckPending) return;
-  postTerminalFenceRecheckPending = true;
-  const target = backend;
-  const generation = cliSpawnGeneration;
-  void (async () => {
-    try {
-      try {
-        await renderer?.writeAndFlush('');
-      } catch (err: any) {
-        log(`${cliName()} post-terminal fence recheck renderer settle failed: ${err.message}`);
-        return;
-      }
-      if (!target || backend !== target || generation !== cliSpawnGeneration
-        || cliRestartInProgress || !currentPostTerminalInputFence()) return;
-      if (bridgeJsonlPath) {
-        try { bridgeDrainAndMaybeEmit(); } catch (err: any) { log(`Bridge emit error: ${err.message}`); }
-      }
-      if (codexBridgeFallbackActive()) {
-        try { codexBridgeDrainAndMaybeEmit({ signalIdle: false }); } catch (err: any) { log(`Codex bridge emit error: ${err.message}`); }
-      }
-      if (backend !== target || generation !== cliSpawnGeneration) return;
-      if (postTerminalPromptFenceHolds('external', target)) return;
-      log(`${cliName()} post-terminal composer verified on static screen (${reason})`);
-      // Publish through the detector's idle edge when the fence rejection
-      // reset() it: markIdle re-arms busyTransitionArmed, so a later local
-      // (web-terminal) turn can still flip readiness back to busy. The onIdle
-      // handler re-verifies the composer before marking ready.
-      if (idleDetector && !idleDetector.isIdleNow()) {
-        idleDetector.fireIdle();
-        if (idleDetector.isIdleNow()) return;
-      }
-      markPromptReady();
-    } finally {
-      postTerminalFenceRecheckPending = false;
-    }
-  })();
+ * settled screen shows a composer newer than any busy marker. Held fences are
+ * retried even on static screens; they never fail open on a deadline. */
+function schedulePostTerminalFenceRecheck(_reason: string): void {
+  const fence = currentPostTerminalInputFence();
+  if (fence && !cliRestartInProgress) postTerminalRecheck.request(fence);
 }
 
 async function postTerminalInputIsBlocked(target: SessionBackend): Promise<boolean> {
@@ -22606,6 +22634,10 @@ async function spawnCli(
     ...argvBakedOpts,
     reliableTurnTerminal: cliAdapter.reliableTurnTerminal === true,
   });
+  spawnArgvInitialTurn = spawnArgvInitialPromptBusy ? {
+    generation: cliSpawnGeneration, cliSessionId: lastSpawnEffectiveCliSessionId,
+    turnId: cfg.turnId, dispatchAttempt: cfg.dispatchAttempt,
+  } : null;
   // Fresh evidence window for the argv first-turn start gate (Pi): the new
   // generation must not inherit a previous spawn's latch or fail-open timer.
   stopSpawnArgvTurnStartFailOpen();
@@ -26314,6 +26346,8 @@ function killCli(opts: {
   if (backend) previousCliEndedAtMs = Date.now();
   inputDeliveryQuarantine = null;
   postTerminalInputFence = null;
+  postTerminalRecheck.cancel();
+  spawnArgvInitialTurn = null;
   currentCliCredentialIsolated = false;
   stopNativeSessionTitleSync();
   stopSessionMcpGatewayHost();
