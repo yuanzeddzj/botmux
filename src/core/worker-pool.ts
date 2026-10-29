@@ -5703,6 +5703,52 @@ export function resolvePrivateCardAudience(ds: DaemonSession): string[] {
 }
 
 /**
+ * Deliver one operational notice only to the configured primary owner.
+ *
+ * Flat groups prefer an in-chat ephemeral card so the notice stays beside the
+ * work while remaining visible to exactly one person. Feishu does not render
+ * ephemeral cards reliably in topic/thread conversations, so those sessions
+ * and p2p conversations go straight to the owner's DM. Both delivery paths are
+ * private; failure is fail-closed and never falls back to a public reply.
+ */
+export async function deliverOwnerPrivateNotice(
+  ds: DaemonSession,
+  message: string,
+): Promise<'ephemeral' | 'dm' | 'failed' | 'no_owner'> {
+  const ownerOpenId = getOwnerOpenId(ds.larkAppId);
+  if (!ownerOpenId) {
+    logger.warn(`[${tag(ds)}] owner-private notice dropped: no configured owner`);
+    return 'no_owner';
+  }
+
+  const replyTarget = ds.currentReplyTarget ?? ds.session.currentReplyTarget;
+  const isThreaded = ds.scope === 'thread'
+    || (!!replyTarget?.rootMessageId && replyTarget.quoteOnly !== true);
+  if (ds.chatType !== 'p2p' && !isThreaded) {
+    const cardJson = JSON.stringify({
+      config: { wide_screen_mode: true },
+      elements: [{ tag: 'div', text: { tag: 'lark_md', content: message } }],
+    });
+    try {
+      await sendEphemeralCard(ds.larkAppId, ds.chatId, ownerOpenId, cardJson);
+      logger.info(`[${tag(ds)}] owner-private notice delivered via ephemeral card`);
+      return 'ephemeral';
+    } catch (err) {
+      logger.info(`[${tag(ds)}] owner-private ephemeral unavailable (${err}); falling back to DM`);
+    }
+  }
+
+  try {
+    await sendUserMessage(ds.larkAppId, ownerOpenId, message, 'text');
+    logger.info(`[${tag(ds)}] owner-private notice delivered via DM`);
+    return 'dm';
+  } catch (err) {
+    logger.warn(`[${tag(ds)}] owner-private notice delivery failed: ${err}`);
+    return 'failed';
+  }
+}
+
+/**
  * Private `/card`: build a one-shot snapshot of the current terminal and send it
  * as an ephemeral (visible-to-one) card to each open_id in `audience`, one API
  * call each (concurrency-capped). Never posts a group-visible card and never
@@ -18656,6 +18702,10 @@ function setupWorkerHandlers(
             logger.info(`[${t}] Codex App no-progress nudge muted by noProgressNotify.enabled=false`);
             break;
           }
+        }
+        if (msg.audience === 'owner') {
+          await deliverOwnerPrivateNotice(ds, msg.message);
+          break;
         }
         try {
           await scopedReply(msg.message, 'text', msg.turnId);

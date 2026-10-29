@@ -2391,7 +2391,12 @@ export type WorkerToDaemon =
    *  worker process; undefined turnId/attempt is a meaningful tuple. Not an
    *  input receipt: input_received/input_committed keep their own semantics. */
   | { type: 'capture_identity'; revision: number; turnId?: string; dispatchAttempt?: number }
-  | { type: 'user_notify'; message: string; turnId?: string; dispatchAttempt?: number; /** Identifies the Codex App no-progress nudge so the daemon can apply the
+  | { type: 'user_notify'; message: string; turnId?: string; dispatchAttempt?: number;
+      /** Deliver this notice only to the configured bot owner. Flat groups use
+       * a visible-to-owner ephemeral card; topics and p2p fall back to DM. A
+       * private-delivery failure must never fall back to a public reply. */
+      audience?: 'owner';
+      /** Identifies the Codex App no-progress nudge so the daemon can apply the
       * per-bot `noProgressNotify.enabled` mute against the LIVE registry (an
       * already-stalled turn is silenced immediately, no worker round-trip). */
       kind?: 'codex_app_no_progress'

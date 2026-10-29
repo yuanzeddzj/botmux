@@ -4767,6 +4767,7 @@ function executeTraexAutoModelSwitch(
   send({
     type: 'user_notify',
     turnId: action.turnId,
+    audience: 'owner',
     message: t(
       action.reason === 'capacity_timeout'
         ? 'worker.traex_auto_model.capacity_switch'
@@ -4859,7 +4860,7 @@ function observeTraexAutoModelCapacity(screen: string): void {
       if (choice.kind === 'switch') executeTraexAutoModelSwitch(choice, { resumeCurrentTurn: true });
       else if (choice.kind === 'exhausted') {
         publishActiveRuntime({ model: controller.currentModel(), reasoningEffort: lastInitConfig?.reasoningEffort });
-        send({ type: 'user_notify', turnId: choice.turnId,
+        send({ type: 'user_notify', turnId: choice.turnId, audience: 'owner',
           message: t('worker.traex_auto_model.lowest_load_hold', {
             model: choice.model, load: choice.loadPercent ?? '?',
           }) });
@@ -4877,6 +4878,7 @@ function observeTraexAutoModelCapacity(screen: string): void {
     send({
       type: 'user_notify',
       turnId: action.turnId,
+      audience: 'owner',
       message: t('worker.traex_auto_model.exhausted', {
         count: action.modelCount,
         model: action.model,

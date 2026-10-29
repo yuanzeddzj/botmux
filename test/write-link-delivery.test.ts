@@ -18,12 +18,14 @@ const { sendEphemeralCardMock, sendUserMessageMock, botState } = vi.hoisted(() =
   sendUserMessageMock: vi.fn(),
   // Mutable so a test can populate the owner audience (resolvePrivateCardAudience
   // keeps only `ou_`-prefixed allowedUsers).
-  botState: { owners: [] as string[] },
+  botState: { owners: [] as string[], primaryOwner: undefined as string | undefined },
 }));
 
 vi.mock('../src/bot-registry.js', () => ({
   getBot: vi.fn(() => ({ resolvedAllowedUsers: botState.owners, config: { cliId: 'claude-code' } })),
   getAllBots: vi.fn(() => []),
+  getOwnerOpenId: vi.fn(() => botState.primaryOwner),
+  getBotBrand: vi.fn(() => 'feishu'),
   resolveBrandLabel: vi.fn(() => undefined),
 }));
 
@@ -45,7 +47,12 @@ vi.mock('../src/utils/logger.js', () => ({
   logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn(), error: vi.fn() },
 }));
 
-import { deliverWriteLinkCard, deliverWriteLinkCardToOwners, deliverWritableTerminalCardTo } from '../src/core/worker-pool.js';
+import {
+  deliverOwnerPrivateNotice,
+  deliverWriteLinkCard,
+  deliverWriteLinkCardToOwners,
+  deliverWritableTerminalCardTo,
+} from '../src/core/worker-pool.js';
 
 const OP = 'ou_operator';
 const CARD = '{"card":"json"}';
@@ -72,8 +79,47 @@ const liveDs = (over: Partial<DaemonSession> = {}) => ds({
 beforeEach(() => {
   vi.clearAllMocks();
   botState.owners = [];
+  botState.primaryOwner = undefined;
   sendEphemeralCardMock.mockReset().mockResolvedValue('eph_msg_id');
   sendUserMessageMock.mockReset().mockResolvedValue('dm_msg_id');
+});
+
+describe('deliverOwnerPrivateNotice', () => {
+  it('uses a visible-to-owner ephemeral card in a flat group', async () => {
+    botState.primaryOwner = 'ou_primary';
+    const r = await deliverOwnerPrivateNotice(ds({ chatType: 'group', scope: 'chat' }), 'private model notice');
+    expect(r).toBe('ephemeral');
+    expect(sendEphemeralCardMock).toHaveBeenCalledWith(
+      'app',
+      'oc_here',
+      'ou_primary',
+      expect.stringContaining('private model notice'),
+    );
+    expect(sendUserMessageMock).not.toHaveBeenCalled();
+  });
+
+  it('uses DM in a topic and never posts a group-visible fallback', async () => {
+    botState.primaryOwner = 'ou_primary';
+    const r = await deliverOwnerPrivateNotice(ds({ chatType: 'group', scope: 'thread' }), 'private model notice');
+    expect(r).toBe('dm');
+    expect(sendEphemeralCardMock).not.toHaveBeenCalled();
+    expect(sendUserMessageMock).toHaveBeenCalledWith('app', 'ou_primary', 'private model notice', 'text');
+  });
+
+  it('fails closed when no primary owner can be resolved', async () => {
+    const r = await deliverOwnerPrivateNotice(ds({ chatType: 'group', scope: 'chat' }), 'private model notice');
+    expect(r).toBe('no_owner');
+    expect(sendEphemeralCardMock).not.toHaveBeenCalled();
+    expect(sendUserMessageMock).not.toHaveBeenCalled();
+  });
+
+  it('fails closed when both private channels reject', async () => {
+    botState.primaryOwner = 'ou_primary';
+    sendEphemeralCardMock.mockRejectedValueOnce(new Error('ephemeral unavailable'));
+    sendUserMessageMock.mockRejectedValueOnce(new Error('dm unavailable'));
+    const r = await deliverOwnerPrivateNotice(ds({ chatType: 'group', scope: 'chat' }), 'private model notice');
+    expect(r).toBe('failed');
+  });
 });
 
 describe('deliverWriteLinkCard', () => {

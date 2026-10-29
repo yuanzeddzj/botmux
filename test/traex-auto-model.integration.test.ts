@@ -631,12 +631,20 @@ describe('TraeX auto-model real Worker and PTY', () => {
         && message.message.includes(modelOrderNoticeFragment)).length === 2,
       'both capacity-switch notices (core→backup, backup→last)',
     );
-    expect(f.messages.filter(message => message.type === 'user_notify' && message.message.includes(modelOrderNoticeFragment))).toHaveLength(2);
+    const switchNotices = f.messages.filter(message => message.type === 'user_notify'
+      && message.message.includes(modelOrderNoticeFragment));
+    expect(switchNotices).toHaveLength(2);
+    expect(switchNotices).toEqual([
+      expect.objectContaining({ audience: 'owner' }),
+      expect.objectContaining({ audience: 'owner' }),
+    ]);
     for (const launch of rows(f.launches)) {
       expect(launch.args[0]).toBe('resume');
       expect(launch.args.at(-1)).toBe(f.nativeId);
     }
     await f.wait(() => f.messages.some(message => message.type === 'user_notify' && message.message.includes('保持等待')), 'final wait');
+    expect(f.messages.find(message => message.type === 'user_notify'
+      && message.message.includes('保持等待'))).toEqual(expect.objectContaining({ audience: 'owner' }));
     await new Promise(resolveWait => setTimeout(resolveWait, 6_000));
     expect(rows(f.launches)).toHaveLength(3);
     expect(new Set(rows(f.rpcRequests).map(row => row.method))).toEqual(new Set(['initialize', 'initialized', 'model/list']));
