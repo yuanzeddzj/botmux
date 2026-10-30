@@ -1,10 +1,15 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { createContext, runInContext } from 'node:vm';
 import { transpileModule, ModuleKind, ScriptTarget } from 'typescript';
 import { describe, expect, it, vi } from 'vitest';
 import { InflightInputTracker } from '../src/core/inflight-input-tracker.js';
 import { isCodexAppCliId } from '../src/adapters/cli/types.js';
 import { TraexAutoModelController } from '../src/services/traex-auto-model.js';
+import { loadWorkerFunction } from './helpers/worker-function-harness.js';
+import { recordTraexAutoModelCircuitFailure, selectTraexAutoModelCircuit,
+  releaseTraexAutoModelCircuitLease, readTraexAutoModelCircuitState } from '../src/services/traex-auto-model-circuit.js';
 
 // Execute the actual worker handler with a controlled backend. Importing the
 // whole worker would start its IPC/runtime; a copy of the handler would miss
@@ -43,6 +48,29 @@ function harness(delivered = true, interruptKey?: 'ctrlc' | 'esc') {
 }
 
 describe('worker exact interrupt acknowledgement and crash replay', () => {
+  it.each([true, false])('releases a live probe only after cancellation is confirmed (%s)', async delivered => {
+    const root = mkdtempSync(join(tmpdir(), 'botmux-cancel-probe-'));
+    try {
+      const h = harness(delivered);
+      const policy = { enabled: true as const, models: ['core', 'backup'], queueTimeoutMs: 5_000,
+        circuitBreaker: { enabled: true as const, failureThreshold: 1, openMs: 5_000, maxOpenMs: 5_000,
+          halfOpenMaxProbes: 1, successThreshold: 1 } };
+      recordTraexAutoModelCircuitFailure({ dataDir: root, appId: 'bot', model: 'core', config: policy, nowMs: 0 });
+      const probe = selectTraexAutoModelCircuit({ dataDir: root, appId: 'bot', sessionId: 'cancelled',
+        config: policy, nowMs: 5_000, ownerPid: process.pid });
+      const controller = new TraexAutoModelController(policy);
+      controller.beginTurn('stop');
+      Object.assign(h.context, { traexAutoModelController: controller,
+        lastInitConfig: { cliId: 'traex', larkAppId: 'bot', traexAutoModelCircuitLease: probe.lease },
+        config: { session: { dataDir: root } }, releaseTraexAutoModelCircuitLease });
+      h.context.releaseWorkerTraexCircuitLease = loadWorkerFunction('releaseWorkerTraexCircuitLease', h.context);
+      await h.interrupt();
+      expect(readTraexAutoModelCircuitState(root).bots.bot.core.probes).toHaveLength(delivered ? 0 : 1);
+      const next = selectTraexAutoModelCircuit({ dataDir: root, appId: 'bot', sessionId: 'next', config: policy, nowMs: 6_000 });
+      expect(next.model).toBe(delivered ? 'core' : 'backup');
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
   it.each([false, true])('retires only the cancelled turn before ACK (already exited=%s)', async exited => {
     const h = harness();
     if (exited) h.inflightInputs.onCliExit();

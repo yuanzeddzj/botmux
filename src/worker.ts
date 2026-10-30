@@ -635,7 +635,7 @@ import {
   validTraexAutoModelRuntime,
   type TraexAutoModelAction,
 } from './services/traex-auto-model.js';
-import { bindTraexAutoModelCircuitLease, selectTraexAutoModelCircuit } from './services/traex-auto-model-circuit.js';
+import { bindTraexAutoModelCircuitLease, releaseTraexAutoModelCircuitLease, selectTraexAutoModelCircuit } from './services/traex-auto-model-circuit.js';
 import { readTraexModelLoads } from './services/traex-model-load.js';
 import { parseDaemonIpcPort } from './utils/daemon-discovery.js';
 import { withCodexAppContext } from './utils/codex-app-context.js';
@@ -4648,6 +4648,9 @@ const activeTurnAuthority = new ActiveTurnAuthority((previousTurnId, turnId) => 
 function configureTraexAutoModel(
   cfg: Extract<DaemonToWorker, { type: 'init' }>,
 ): void {
+  if (traexAutoModelController?.config.circuitBreaker && !cfg.traexAutoModel?.circuitBreaker) {
+    releaseWorkerTraexCircuitLease();
+  }
   // In-worker restarts receive the current model's resolved overrides. Keep
   // the original shared defaults, including when the pool policy changes.
   const sharedSettings = traexAutoModelController?.sharedSettings
@@ -4731,6 +4734,19 @@ function selectWorkerTraexCircuit(candidates?: string[]) {
     candidates, ownerPid: process.pid });
   if (!selection.allProtected) cfg.traexAutoModelCircuitLease = selection.lease;
   return selection;
+}
+
+function releaseWorkerTraexCircuitLease(): void {
+  const cfg = lastInitConfig;
+  const lease = cfg?.traexAutoModelCircuitLease;
+  if (!cfg || !lease) return;
+  try {
+    releaseTraexAutoModelCircuitLease({ dataDir: config.session.dataDir, appId: cfg.larkAppId,
+      model: lease.model, token: lease.token });
+    cfg.traexAutoModelCircuitLease = undefined;
+  } catch (error) {
+    log(`TraeX circuit probe release failed: ${String(error)}`);
+  }
 }
 
 function reportTraexAutoModelCircuit(
@@ -14184,6 +14200,9 @@ async function handleExactTurnInterrupt(requestId: string, turnId: string): Prom
     // only this exact turn BEFORE acknowledging interruption to the daemon;
     // otherwise the caller sees interrupted while auto-restart executes it again.
     inflightInputs.retireTurn(turnId);
+    if (traexAutoModelController?.config.circuitBreaker && traexAutoModelController.currentTurnId() === turnId) {
+      releaseWorkerTraexCircuitLease();
+    }
     traexAutoModelController?.endTurn(turnId);
     for (let i = pendingMessages.length - 1; i >= 0; i--) {
       if (pendingMessages[i].turnId === turnId) pendingMessages.splice(i, 1);
@@ -29183,8 +29202,9 @@ function emitTurnTerminal(
     return;
   }
   if (status !== 'completed') lastTurnFailureSurfacedAtMs = Date.now();
-  if (status === 'completed' && traexAutoModelController?.currentTurnId() === turnId) {
-    reportTraexAutoModelCircuit('success', turnId, traexAutoModelController.currentModel());
+  if (traexAutoModelController?.config?.circuitBreaker && traexAutoModelController.currentTurnId() === turnId) {
+    if (status === 'completed') reportTraexAutoModelCircuit('success', turnId, traexAutoModelController.currentModel());
+    else releaseWorkerTraexCircuitLease();
   }
   traexAutoModelController?.endTurn(turnId);
   const timing = turnExecutionClock.settle(turnId, dispatchAttempt, completedAtMs);
@@ -30389,8 +30409,10 @@ process.on('message', async (raw: unknown) => {
       if (/^\/(?:model|new|clear)\b/i.test(msg.content.trim())) {
         // An explicit native setting/session command takes precedence until
         // the next worker init; the pool must not undo a manual model choice.
+        if (traexAutoModelController?.config.circuitBreaker) releaseWorkerTraexCircuitLease();
         traexAutoModelController = null;
       } else if (/^\/(?:stop|cancel)\b/i.test(msg.content.trim()) && currentBotmuxTurnId) {
+        if (traexAutoModelController?.config.circuitBreaker) releaseWorkerTraexCircuitLease();
         traexAutoModelController?.endTurn(currentBotmuxTurnId);
         for (let i = pendingMessages.length - 1; i >= 0; i--) {
           if (pendingMessages[i].traexAutoModelRecovery) pendingMessages.splice(i, 1);

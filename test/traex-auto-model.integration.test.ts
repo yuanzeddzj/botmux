@@ -68,6 +68,9 @@ async function fixture(enabled: boolean, loadData: false | 'busy' | 'ordered' = 
   circuitBreaker = false, circuitInitial?: { model?: string; protectedPool?: boolean }) {
   const root = mkdtempSync(join(tmpdir(), 'botmux-auto-model-'));
   roots.push(root);
+  // tmux starts the user's interactive shell. An isolated empty HOME would
+  // otherwise stop at zsh-newuser-install before the fake CLI can exec.
+  writeFileSync(join(root, '.zshrc'), '# isolated Auto model regression\n');
   const dataDir = join(root, 'session');
   const traeHome = join(root, '.trae');
   const cliDir = join(traeHome, 'cli');
