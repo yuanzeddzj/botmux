@@ -2123,6 +2123,7 @@ export type DaemonToWorker = DaemonToWorkerBase extends infer Message
         traexAutoModelRuntime?: import('./services/traex-auto-model.js').TraexAutoModelRuntimeState;
         traexAutoModelCircuitLease?: import('./services/traex-auto-model-circuit.js').TraexAutoModelCircuitLease;
         traexAutoModelCircuitModel?: string;
+        traexAutoModelCircuitBlocked?: boolean;
         /** Experimental, off by default: only an explicit true lets the worker
          *  suppress a failure notice after an exact acknowledged final. */
         suppressDeliveredFinalFailureNotice?: boolean;

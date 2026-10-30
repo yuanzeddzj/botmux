@@ -10,6 +10,7 @@ import {
   readTraexAutoModelCircuitState,
   recordTraexAutoModelCircuitFailure,
   recordTraexAutoModelCircuitSuccess,
+  bindTraexAutoModelCircuitLease,
   releaseTraexAutoModelCircuitLease,
   restoreTraexAutoModelCircuitLease,
   selectTraexAutoModelCircuit,
@@ -129,14 +130,14 @@ describe('durable TraeX auto-model circuit breaker', () => {
     })).toEqual({ model: 'core' });
   });
 
-  it('preserves availability when every model is protected without granting an extra probe', () => {
+  it('requires callers to wait when every model is protected without granting an extra probe', () => {
     const dataDir = root();
     const policy = config();
     recordTraexAutoModelCircuitFailure({ dataDir, appId: 'bot-a', model: 'core', config: policy, nowMs: 0 });
     recordTraexAutoModelCircuitFailure({ dataDir, appId: 'bot-a', model: 'backup', config: policy, nowMs: 100 });
     expect(selectTraexAutoModelCircuit({
       dataDir, appId: 'bot-a', sessionId: 'emergency', config: policy, nowMs: 200,
-    })).toEqual({ model: 'core', allProtected: true });
+    })).toEqual({ model: 'core', allProtected: true, retryAtMs: 600_000 });
   });
 
   it('releases only the exact unused fork probe', () => {
@@ -157,6 +158,21 @@ describe('durable TraeX auto-model circuit breaker', () => {
     expect(selectTraexAutoModelCircuit({
       dataDir, appId: 'bot-a', sessionId: 'retry', config: policy, nowMs: 600_001,
     }).lease).toBeTruthy();
+  });
+
+  it('keeps a live long-running probe exclusive and ignores events with retired probe tokens', () => {
+    const dataDir = root();
+    const policy = config();
+    recordTraexAutoModelCircuitFailure({ dataDir, appId: 'bot-a', model: 'core', config: policy, nowMs: 0 });
+    const probe = selectTraexAutoModelCircuit({ dataDir, appId: 'bot-a', sessionId: 'probe', config: policy, nowMs: 600_000 });
+    bindTraexAutoModelCircuitLease({ dataDir, appId: 'bot-a', model: 'core', token: probe.lease!.token, pid: process.pid });
+    expect(selectTraexAutoModelCircuit({ dataDir, appId: 'bot-a', sessionId: 'other', config: policy, nowMs: 5_000_000 }))
+      .toEqual({ model: 'backup' });
+    recordTraexAutoModelCircuitFailure({ dataDir, appId: 'bot-a', model: 'core', config: policy,
+      leaseToken: 'retired-token', nowMs: 5_000_001 });
+    recordTraexAutoModelCircuitSuccess({ dataDir, appId: 'bot-a', model: 'core', config: policy,
+      leaseToken: 'retired-token', nowMs: 5_000_001 });
+    expect(readTraexAutoModelCircuitState(dataDir).bots['bot-a'].core.state).toBe('half_open');
   });
 
   it('serializes concurrent daemon processes so only one acquires the HALF_OPEN probe', async () => {

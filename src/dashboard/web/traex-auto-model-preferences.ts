@@ -25,13 +25,16 @@ export interface TraexAutoModelPreferences {
   modelSettings: Record<string, TraexAutoModelSettings>;
   timeoutSeconds: string;
   cooldownSeconds: string;
-  circuitBreakerEnabled: boolean;
-  circuitOpenSeconds: string;
-  circuitMaxOpenSeconds: string;
+  circuitBreakerEnabled?: boolean;
+  circuitOpenSeconds?: string;
+  circuitMaxOpenSeconds?: string;
 }
 
 export interface TraexAutoModelDraft extends TraexAutoModelPreferences {
   enabled: boolean;
+  circuitBreakerEnabled: boolean;
+  circuitOpenSeconds: string;
+  circuitMaxOpenSeconds: string;
 }
 
 export function autoModelDraftFromConfig(
@@ -96,9 +99,9 @@ export function readAutoModelDraft(botId: string, storage = autoModelDraftStorag
       modelSettings: value.draft.modelSettings,
       timeoutSeconds: value.draft.timeoutSeconds,
       cooldownSeconds: value.draft.cooldownSeconds,
-      circuitBreakerEnabled: value.draft.circuitBreakerEnabled === true,
-      circuitOpenSeconds: value.draft.circuitOpenSeconds ?? '600',
-      circuitMaxOpenSeconds: value.draft.circuitMaxOpenSeconds ?? '1800',
+      ...(value.draft.circuitBreakerEnabled !== undefined ? { circuitBreakerEnabled: value.draft.circuitBreakerEnabled } : {}),
+      ...(value.draft.circuitOpenSeconds !== undefined ? { circuitOpenSeconds: value.draft.circuitOpenSeconds } : {}),
+      ...(value.draft.circuitMaxOpenSeconds !== undefined ? { circuitMaxOpenSeconds: value.draft.circuitMaxOpenSeconds } : {}),
     };
   } catch { return undefined; }
 }

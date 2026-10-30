@@ -28,7 +28,7 @@ describe('normalizeTraexAutoModelConfig', () => {
     expect(normalizeTraexAutoModelConfig({ enabled: false, models: ['m1'] })).toEqual({});
   });
 
-  it('normalizes durable circuit defaults and keeps them in the policy identity', () => {
+  it('normalizes durable circuit defaults without invalidating existing session selections', () => {
     const parsed = normalizeTraexAutoModelConfig({
       enabled: true,
       models: ['preferred', 'fallback'],
@@ -42,11 +42,20 @@ describe('normalizeTraexAutoModelConfig', () => {
       halfOpenMaxProbes: 1,
       successThreshold: 1,
     });
-    expect(traexAutoModelPolicyKey(parsed.config!)).not.toBe(traexAutoModelPolicyKey({
+    expect(traexAutoModelPolicyKey(parsed.config!)).toBe(traexAutoModelPolicyKey({
       enabled: true,
       models: ['preferred', 'fallback'],
       queueTimeoutMs: 30_000,
     }));
+  });
+
+  it('restores the old on-disk policy signature after adding queue protection', () => {
+    const parsed = normalizeTraexAutoModelConfig({ enabled: true, models: ['core', 'backup'], circuitBreaker: { enabled: true } }).config!;
+    const oldKey = JSON.stringify([['core', 'backup'], false, 30_000, 60_000,
+      [[false, null, null], [false, null, null]]]);
+    const oldState = { model: 'backup', waitingOnFinalModel: true, nativeSessionId: 'native', policyKey: oldKey };
+    expect(validTraexAutoModelRuntime(parsed, oldState, 'native')).toBe(true);
+    expect(new TraexAutoModelController(parsed, oldState).currentModel()).toBe('backup');
   });
 
   it.each([

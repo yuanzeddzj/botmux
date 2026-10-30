@@ -635,6 +635,7 @@ import {
   validTraexAutoModelRuntime,
   type TraexAutoModelAction,
 } from './services/traex-auto-model.js';
+import { bindTraexAutoModelCircuitLease, selectTraexAutoModelCircuit } from './services/traex-auto-model-circuit.js';
 import { readTraexModelLoads } from './services/traex-model-load.js';
 import { parseDaemonIpcPort } from './utils/daemon-discovery.js';
 import { withCodexAppContext } from './utils/codex-app-context.js';
@@ -4680,6 +4681,10 @@ function configureTraexAutoModel(
   traexAutoModelSwitching = false;
   traexAutoModelTurnReplayForbidden = cfg.atMostOnce === true;
   if (traexAutoModelController) {
+    if (cfg.traexAutoModelCircuitLease) {
+      bindTraexAutoModelCircuitLease({ dataDir: config.session.dataDir, appId: cfg.larkAppId,
+        model: cfg.traexAutoModelCircuitLease.model, token: cfg.traexAutoModelCircuitLease.token, pid: process.pid });
+    }
     if (restoreRuntime) {
       deliveredPluginSkillCatalogFingerprint = restoreRuntime.skillCatalogFingerprint;
     }
@@ -4698,13 +4703,34 @@ function configureTraexAutoModel(
     && cfg.prompt
     && cfg.turnId
     && cfg.dispatchAttempt === undefined) {
-    traexAutoModelController.beginTurn(cfg.turnId);
+    traexAutoModelController.beginTurn(cfg.turnId, { retainCurrentModel: true });
   }
 }
 
 const traexAutoModelCircuitFailures = new Set<string>();
 function traexAutoModelCircuitKey(turnId: string, model: string): string {
   return `${turnId}\0${model.toLowerCase()}`;
+}
+
+let traexCircuitRetryTimer: ReturnType<typeof setTimeout> | undefined;
+function retryTraexCircuitAdmission(): void {
+  if (traexCircuitRetryTimer) return;
+  traexCircuitRetryTimer = setTimeout(() => {
+    traexCircuitRetryTimer = undefined;
+    if (backend && pendingMessages.length > 0) void flushPending();
+  }, 1_000);
+  traexCircuitRetryTimer.unref();
+}
+
+/** One shared locked store governs fresh launches, reselection and fallback.
+ * This is capacity coordination, independent of CLI authorization. */
+function selectWorkerTraexCircuit(candidates?: string[]) {
+  const cfg = lastInitConfig!;
+  const selection = selectTraexAutoModelCircuit({ dataDir: config.session.dataDir,
+    appId: cfg.larkAppId, sessionId: cfg.sessionId, config: cfg.traexAutoModel!,
+    candidates, ownerPid: process.pid });
+  if (!selection.allProtected) cfg.traexAutoModelCircuitLease = selection.lease;
+  return selection;
 }
 
 function reportTraexAutoModelCircuit(
@@ -4768,11 +4794,37 @@ function executeTraexAutoModelSwitch(
     || isFlushing
     || !lastInitConfig) return false;
   const nativeSessionId = lastInitConfig.cliSessionId;
-  if (!nativeSessionId) return false;
+  if (!nativeSessionId && (opts.resumeCurrentTurn || !traexAutoModelController?.config.circuitBreaker)) return false;
   if (opts.resumeCurrentTurn && traexAutoModelTurnReplayForbidden) return false;
   const active = activeTurnAuthority.snapshot();
   if (opts.resumeCurrentTurn && (!active?.started || active.turnId !== action.turnId
     || active.dispatchAttempt !== undefined)) return false;
+  if (traexAutoModelController?.config.circuitBreaker) {
+    if (action.reason !== 'new_turn') reportTraexAutoModelCircuit('capacity_queue', action.turnId, action.fromModel);
+    try {
+      const candidates = action.reason === 'new_turn' ? undefined
+        : action.reason === 'lowest_load' || action.reason === 'shortest_queue' ? [action.toModel]
+        : traexAutoModelController.config.models.slice(action.toIndex);
+      const selection = selectWorkerTraexCircuit(candidates);
+      if (selection.allProtected) {
+        if (action.reason === 'new_turn') retryTraexCircuitAdmission();
+        return action.reason === 'new_turn';
+      }
+      if (selection.model === action.fromModel) {
+        traexAutoModelController.beginTurn(action.turnId, { retainCurrentModel: true });
+        return false;
+      }
+      if (selection.model !== action.toModel) {
+        action = { ...action, toModel: selection.model,
+          toIndex: traexAutoModelController.config.models.indexOf(selection.model),
+          queuePosition: undefined, loadPercent: undefined };
+      }
+    } catch (error) {
+      log(`TraeX circuit admission unavailable: ${String(error)}`);
+      retryTraexCircuitAdmission();
+      return action.reason === 'new_turn';
+    }
+  }
   if (!traexAutoModelController?.commitSwitch(action)) return false;
   if (action.reason !== 'new_turn' && traexAutoModelController.config.circuitBreaker) {
     reportTraexAutoModelCircuit('capacity_queue', action.turnId, action.fromModel);
@@ -4862,6 +4914,9 @@ function observeTraexAutoModelCapacity(screen: string): void {
     queuePosition: traexCapacityQueuePosition(screen),
     progressing,
   });
+  if (controller.config.circuitBreaker && active.turnId && controller.confirmedCapacityQueue(Date.now())) {
+    reportTraexAutoModelCircuit('capacity_queue', active.turnId, controller.currentModel());
+  }
   if (awaitingActivity && !controller.awaitingModelActivity() && progressing) {
     void flushPending();
   }
@@ -4929,7 +4984,7 @@ function resetTraexAutoModelBeforePendingTurn(): boolean {
   const head = pendingMessages[0];
   if (!controller || !traexAutoModelRuntimeEligible() || !head?.turnId
     || head.dispatchAttempt !== undefined || head.traexAutoModelRecovery
-    || controller.currentTurnId() === head.turnId) return false;
+    || (controller.currentTurnId() === head.turnId && !lastInitConfig?.traexAutoModelCircuitBlocked)) return false;
   if (traexAutoModelSwitching) return true;
   // Type-ahead steers the turn that currently owns the CLI. Once a structured
   // terminal has released that turn (no active authority) but the PTY composer
@@ -4944,13 +4999,35 @@ function resetTraexAutoModelBeforePendingTurn(): boolean {
     && !activeTurnAuthority.snapshot()
     && queuedTypeAheadTurns.length === 0) return true;
   if (!isPromptReady) return traexAutoModelInputHold();
+  if (controller.config.circuitBreaker && lastInitConfig?.traexAutoModelCircuitBlocked) {
+    try {
+      const selection = selectWorkerTraexCircuit();
+      if (selection.allProtected) { retryTraexCircuitAdmission(); return true; }
+      lastInitConfig.traexAutoModelCircuitBlocked = false;
+      if (selection.model !== controller.currentModel()) {
+        return executeTraexAutoModelSwitch({ kind: 'switch', reason: 'new_turn', turnId: head.turnId,
+          fromModel: controller.currentModel(), toModel: selection.model,
+          toIndex: controller.config.models.indexOf(selection.model) }, { resumeCurrentTurn: false });
+      }
+    } catch (error) {
+      log(`TraeX circuit input held: ${String(error)}`);
+      retryTraexCircuitAdmission();
+      return true;
+    }
+  }
   if (!controller.config.reselectPerTurn || controller.currentModelIndex() === 0) return false;
   // commitSwitch can only be reached through executeTraexAutoModelSwitch,
   // which requires the exact native id before advancing the pool index.
   // Restoring an index also requires validTraexAutoModelRuntime's native id.
   // Thus index > 0 without cliSessionId is unreachable in a managed runtime;
   // keep the fail-closed guard for inconsistent future restore paths.
-  if (!lastInitConfig?.cliSessionId) return true;
+  if (!lastInitConfig?.cliSessionId) {
+    if (controller.config.circuitBreaker && !activeTurnAuthority.snapshot()?.started) {
+      controller.beginTurn(head.turnId, { retainCurrentModel: true });
+      return false;
+    }
+    return true;
+  }
   const action = controller.beginTurn(head.turnId);
   return action.kind === 'switch'
     ? executeTraexAutoModelSwitch(action, { resumeCurrentTurn: false })
@@ -29106,7 +29183,7 @@ function emitTurnTerminal(
     return;
   }
   if (status !== 'completed') lastTurnFailureSurfacedAtMs = Date.now();
-  if (status === 'completed' && traexAutoModelController) {
+  if (status === 'completed' && traexAutoModelController?.currentTurnId() === turnId) {
     reportTraexAutoModelCircuit('success', turnId, traexAutoModelController.currentModel());
   }
   traexAutoModelController?.endTurn(turnId);

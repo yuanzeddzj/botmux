@@ -259,7 +259,6 @@ export interface TraexAutoModelRuntimeState {
 export function traexAutoModelPolicyKey(config: TraexAutoModelConfig): string {
   return JSON.stringify([config.models, config.reselectPerTurn === true,
     config.queueTimeoutMs, config.switchCooldownMs ?? TRAEX_AUTO_MODEL_DEFAULT_SWITCH_COOLDOWN_MS,
-    config.circuitBreaker ?? null,
     config.models.map(model => {
       const settings = resolveTraexAutoModelSettings(config, model);
       return [Object.prototype.hasOwnProperty.call(config.modelSettings ?? {}, model),
@@ -320,6 +319,7 @@ export class TraexAutoModelController {
   private searchingBackups = false;
   private progressSinceMs: number | undefined;
   private awaitingActivity = false;
+  private capacityEvidenceSinceMs: number | undefined;
 
   readonly sharedSettings?: TraexAutoModelSettings;
 
@@ -348,6 +348,7 @@ export class TraexAutoModelController {
     const index = this.config.models.findIndex(candidate => candidate.toLowerCase() === model.toLowerCase());
     if (index < 0 || index === this.currentIndex) return;
     this.currentIndex = index;
+    this.capacityEvidenceSinceMs = undefined;
     this.exhausted = false;
     this.searchingBackups = false;
     this.queueSinceMs = undefined;
@@ -364,6 +365,11 @@ export class TraexAutoModelController {
 
   currentTurnId(): string | undefined {
     return this.turnId;
+  }
+
+  confirmedCapacityQueue(nowMs: number): boolean {
+    return this.capacityEvidenceSinceMs !== undefined
+      && nowMs - this.capacityEvidenceSinceMs >= (this.searchingBackups ? 1_000 : this.config.queueTimeoutMs);
   }
 
   queueObserved(): boolean {
@@ -405,6 +411,7 @@ export class TraexAutoModelController {
     if (options.retainCurrentModel || !this.config.reselectPerTurn || this.currentIndex === 0) {
       this.turnId = turnId;
       this.queueSinceMs = undefined;
+      this.capacityEvidenceSinceMs = undefined;
       this.liveCapacityQueued = false;
       if (this.config.reselectPerTurn) this.exhausted = false;
       this.searchingBackups = false;
@@ -433,6 +440,7 @@ export class TraexAutoModelController {
       return false;
     }
     this.currentIndex = action.toIndex;
+    this.capacityEvidenceSinceMs = undefined;
     this.turnId = action.turnId;
     this.queueSinceMs = undefined;
     this.liveCapacityQueued = false;
@@ -453,6 +461,7 @@ export class TraexAutoModelController {
     if (this.turnId !== turnId) return;
     this.awaitingActivity = false;
     this.turnId = undefined;
+    this.capacityEvidenceSinceMs = undefined;
     this.queueSinceMs = undefined;
     // liveCapacityQueued describes the PANE, not the turn: a structured
     // terminal does not repaint the queued pane, so keep that fact across
@@ -523,6 +532,8 @@ export class TraexAutoModelController {
     // observation of the current pane, independent of turn-id ownership.
     this.liveCapacityQueued = input.queued;
     if (!input.turnId || input.turnId !== this.turnId) return { kind: 'none' };
+    if (input.queued) this.capacityEvidenceSinceMs ??= input.nowMs;
+    else this.capacityEvidenceSinceMs = undefined;
     if (input.queued || input.progressing) this.awaitingActivity = false;
     if (!input.queued) {
       this.queueSinceMs = undefined;

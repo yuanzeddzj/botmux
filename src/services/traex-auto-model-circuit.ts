@@ -1,10 +1,12 @@
-import { existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { mkdirSync, readFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
 
 import type { TraexAutoModelConfig } from './traex-auto-model.js';
 import { atomicWriteFileSync } from '../utils/atomic-write.js';
 import { withFileLockSync } from '../utils/file-lock.js';
+import { readDurableProcessIdentity, isLinuxZombie } from '../utils/process-identity.js';
+import { pidIsSignalable } from '../utils/process-alive.js';
 
 const FILE_NAME = 'traex-auto-model-circuits.json';
 
@@ -16,6 +18,8 @@ export interface TraexAutoModelCircuitLease {
 
 interface PersistedProbe extends TraexAutoModelCircuitLease {
   sessionId: string;
+  pid?: number;
+  procStart?: string;
 }
 
 export interface TraexAutoModelCircuitEntry {
@@ -27,6 +31,7 @@ export interface TraexAutoModelCircuitEntry {
   openUntilMs?: number;
   probes: PersistedProbe[];
   updatedAtMs: number;
+  failureObservations?: string[];
 }
 
 interface CircuitFile {
@@ -40,6 +45,7 @@ export interface TraexAutoModelCircuitSelection {
   /** Every configured model was still protected or already probing. The
    * earliest recovery candidate is used to preserve availability. */
   allProtected?: true;
+  retryAtMs?: number;
 }
 
 export class TraexAutoModelCircuitStoreError extends Error {
@@ -54,16 +60,16 @@ export function traexAutoModelCircuitPath(dataDir: string): string {
 }
 
 function emptyFile(): CircuitFile {
-  return { version: 1, bots: {} };
+  return { version: 1, bots: Object.create(null) };
 }
 
 function readFileStrict(dataDir: string): CircuitFile {
   const path = traexAutoModelCircuitPath(dataDir);
-  if (!existsSync(path)) return emptyFile();
   let value: unknown;
   try {
     value = JSON.parse(readFileSync(path, 'utf8'));
   } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return emptyFile();
     throw new TraexAutoModelCircuitStoreError(`cannot read TraeX auto-model circuit state at ${path}`, error);
   }
   const raw = value as Partial<CircuitFile> | null;
@@ -76,8 +82,10 @@ function readFileStrict(dataDir: string): CircuitFile {
       throw new TraexAutoModelCircuitStoreError(`invalid TraeX auto-model circuit bot entry at ${path}`);
     }
     for (const entry of Object.values(models)) validateEntry(entry, path);
+    Object.defineProperty(raw.bots, appId, { value: Object.assign(Object.create(null), models),
+      enumerable: true, configurable: true, writable: true });
   }
-  return raw as CircuitFile;
+  return { version: 1, bots: Object.assign(Object.create(null), raw.bots) };
 }
 
 function validateEntry(value: unknown, path: string): asserts value is TraexAutoModelCircuitEntry {
@@ -101,6 +109,13 @@ function validateEntry(value: unknown, path: string): asserts value is TraexAuto
       || probe.acquiredAtMs < 0) {
       throw new TraexAutoModelCircuitStoreError(`invalid TraeX auto-model circuit probe at ${path}`);
     }
+    if (probe.pid !== undefined && (!Number.isSafeInteger(probe.pid) || probe.pid <= 1)) {
+      throw new TraexAutoModelCircuitStoreError(`invalid TraeX auto-model probe process at ${path}`);
+    }
+  }
+  if (entry.failureObservations !== undefined && (!Array.isArray(entry.failureObservations)
+    || !entry.failureObservations.every(key => typeof key === 'string'))) {
+    throw new TraexAutoModelCircuitStoreError(`invalid TraeX auto-model failure observations at ${path}`);
   }
 }
 
@@ -133,7 +148,7 @@ function modelKey(model: string): string {
 }
 
 function botEntries(file: CircuitFile, appId: string): Record<string, TraexAutoModelCircuitEntry> {
-  return file.bots[appId] ??= {};
+  return file.bots[appId] ??= Object.create(null);
 }
 
 function probeLeaseMs(config: TraexAutoModelConfig): number {
@@ -141,7 +156,14 @@ function probeLeaseMs(config: TraexAutoModelConfig): number {
 }
 
 function pruneProbes(entry: TraexAutoModelCircuitEntry, config: TraexAutoModelConfig, nowMs: number): boolean {
-  const probes = entry.probes.filter(probe => nowMs - probe.acquiredAtMs < probeLeaseMs(config));
+  const probes = entry.probes.filter(probe => {
+    if (probe.pid) {
+      if (isLinuxZombie(probe.pid)) return false;
+      const start = readDurableProcessIdentity(probe.pid);
+      return start && probe.procStart ? start === probe.procStart : pidIsSignalable(probe.pid);
+    }
+    return nowMs - probe.acquiredAtMs < probeLeaseMs(config);
+  });
   if (probes.length === entry.probes.length) return false;
   entry.probes = probes;
   entry.updatedAtMs = nowMs;
@@ -165,6 +187,8 @@ export function selectTraexAutoModelCircuit(input: {
   config: TraexAutoModelConfig;
   /** Empty daemon-restoration forks must not consume the sole recovery probe. */
   allowProbe?: boolean;
+  candidates?: string[];
+  ownerPid?: number;
   nowMs?: number;
 }): TraexAutoModelCircuitSelection {
   const circuit = input.config.circuitBreaker;
@@ -174,10 +198,14 @@ export function selectTraexAutoModelCircuit(input: {
     const entries = botEntries(file, input.appId);
     let changed = false;
     let earliest: { model: string; atMs: number } | undefined;
-    for (const model of input.config.models) {
+    const candidates = input.candidates ?? input.config.models;
+    for (const model of candidates) {
+      if (!input.config.models.includes(model)) throw new Error('circuit candidate outside configured pool');
       const entry = entries[modelKey(model)];
       if (!entry || entry.state === 'closed') return { result: { model }, changed };
-      changed = transitionExpiredOpen(entry, nowMs) || pruneProbes(entry, input.config, nowMs) || changed;
+      const transitioned = transitionExpiredOpen(entry, nowMs);
+      const pruned = pruneProbes(entry, input.config, nowMs);
+      changed = transitioned || pruned || changed;
       const existing = entry.probes.find(probe => probe.sessionId === input.sessionId);
       if (existing) {
         return {
@@ -189,20 +217,33 @@ export function selectTraexAutoModelCircuit(input: {
       if (input.allowProbe !== false && entry.state === 'half_open'
         && entry.probes.length < Math.min(circuit.halfOpenMaxProbes, probesNeeded)) {
         const lease = { model, token: randomUUID(), acquiredAtMs: nowMs };
-        entry.probes.push({ ...lease, sessionId: input.sessionId });
+        entry.probes.push({ ...lease, sessionId: input.sessionId,
+          ...(input.ownerPid ? { pid: input.ownerPid, procStart: readDurableProcessIdentity(input.ownerPid) } : {}) });
         entry.updatedAtMs = nowMs;
         return { result: { model, lease }, changed: true };
       }
       const atMs = entry.state === 'open' ? entry.openUntilMs ?? Infinity : nowMs + probeLeaseMs(input.config);
       if (!earliest || atMs < earliest.atMs) earliest = { model, atMs };
     }
-    // A completely protected pool must not black-hole the user's turn. Use the
-    // earliest candidate without granting another recovery lease; its result
-    // cannot close a circuit, so the bounded probe contract remains intact.
+    // A placeholder model may start the CLI shell, but callers MUST keep input
+    // outside it until a CLOSED candidate or an exact probe is admitted.
     return {
-      result: { model: earliest?.model ?? input.config.models.at(-1)!, allProtected: true },
+      result: { model: earliest?.model ?? input.config.models.at(-1)!, allProtected: true,
+        retryAtMs: earliest?.atMs ?? nowMs + 1_000 },
       changed,
     };
+  });
+}
+
+export function bindTraexAutoModelCircuitLease(input: {
+  dataDir: string; appId: string; model: string; token: string; pid: number;
+}): void {
+  mutate(input.dataDir, file => {
+    const probe = file.bots[input.appId]?.[modelKey(input.model)]?.probes.find(p => p.token === input.token);
+    if (!probe) return { result: undefined, changed: false };
+    probe.pid = input.pid;
+    probe.procStart = readDurableProcessIdentity(input.pid);
+    return { result: undefined, changed: true };
   });
 }
 
@@ -269,6 +310,7 @@ export function recordTraexAutoModelCircuitFailure(input: {
   model: string;
   config: TraexAutoModelConfig;
   leaseToken?: string;
+  observationKey?: string;
   nowMs?: number;
 }): void {
   const circuit = input.config.circuitBreaker;
@@ -286,9 +328,15 @@ export function recordTraexAutoModelCircuitFailure(input: {
       probes: [],
       updatedAtMs: nowMs,
     };
+    if (input.observationKey) {
+      if (entry.failureObservations?.includes(input.observationKey)) return { result: undefined, changed: false };
+      entry.failureObservations = [...(entry.failureObservations ?? []), input.observationKey].slice(-256);
+    }
     if (entry.state === 'open') return { result: undefined, changed: false };
-    if (entry.state === 'half_open'
-      || (input.leaseToken && entry.probes.some(probe => probe.token === input.leaseToken))) {
+    if (entry.state === 'half_open') {
+      if (!input.leaseToken || !entry.probes.some(probe => probe.token === input.leaseToken)) {
+        return { result: undefined, changed: false };
+      }
       openEntry(entry, input.config, nowMs);
       return { result: undefined, changed: true };
     }

@@ -172,6 +172,7 @@ import {
 import {
   recordTraexAutoModelCircuitFailure,
   recordTraexAutoModelCircuitSuccess,
+  bindTraexAutoModelCircuitLease,
   releaseTraexAutoModelCircuitLease,
   restoreTraexAutoModelCircuitLease,
   selectTraexAutoModelCircuit,
@@ -14635,6 +14636,7 @@ export function forkWorker(
   let agentCfg!: ReturnType<typeof sessionAgentConfig>;
   let traexAutoModelCircuitLease: TraexAutoModelCircuitLease | undefined;
   let traexAutoModelCircuitModel: string | undefined;
+  let traexAutoModelCircuitBlocked = false;
   const t = tag(ds);
   ds.localProcessAttestation = undefined;
   try {
@@ -14753,7 +14755,9 @@ export function forkWorker(
   if (!isSharedAdoptSession(ds)) reclaimParkedCrashDiagnostic(ds);
 
   agentCfg = sessionAgentConfig(ds, botCfg);
-  if (agentCfg.traexAutoModel?.circuitBreaker) {
+  if (agentCfg.traexAutoModel?.circuitBreaker && !ds.session.adoptedFrom
+    && !agentCfg.wrapperCli && !agentCfg.cliLaunchMode && !initAtMostOnce
+    && initDispatchAttempt === undefined && !isRemoteBackendSession(ds)) {
     try {
       const runtimeValid = validTraexAutoModelRuntime(
         agentCfg.traexAutoModel,
@@ -14779,13 +14783,15 @@ export function forkWorker(
         agentCfg.model = selection.model;
         traexAutoModelCircuitModel = selection.model;
         traexAutoModelCircuitLease = selection.lease;
+        traexAutoModelCircuitBlocked = selection.allProtected === true;
         recordLaunchModel(ds, selection.model);
         if (selection.allProtected) {
-          logger.warn(`[${t}] TraeX auto-model circuit pool fully protected; using earliest recovery candidate ${selection.model}`);
+          logger.info(`[${t}] TraeX auto-model pool protected; input will wait for recovery admission`);
         }
       }
     } catch (error) {
       logger.error(`[${t}] TraeX auto-model circuit unavailable; keeping session model: ${String(error)}`);
+      traexAutoModelCircuitBlocked = true;
     }
   }
   if (!initTurnId && prompt.length > 0 && isCodexAppCliId(agentCfg.cliId)) {
@@ -15036,6 +15042,10 @@ export function forkWorker(
     } as NodeJS.ProcessEnv,
   });
   spawnedWorker = worker;
+  if (traexAutoModelCircuitLease && worker.pid) {
+    bindTraexAutoModelCircuitLease({ dataDir: config.session.dataDir, appId: ds.larkAppId,
+      model: traexAutoModelCircuitLease.model, token: traexAutoModelCircuitLease.token, pid: worker.pid });
+  }
   startupState = {
     ready: false, failureNotified: false,
     initTurnId: initAttributionTurnId,
@@ -15193,6 +15203,7 @@ export function forkWorker(
     traexAutoModelRuntime: ds.session.traexAutoModelRuntime,
     ...(traexAutoModelCircuitLease ? { traexAutoModelCircuitLease } : {}),
     ...(traexAutoModelCircuitModel ? { traexAutoModelCircuitModel } : {}),
+    ...(traexAutoModelCircuitBlocked ? { traexAutoModelCircuitBlocked: true } : {}),
     modelBackendVariant: agentCfg.modelBackendVariant,
     reasoningEffort: agentCfg.reasoningEffort,
     codexProfile: agentCfg.codexProfile,
@@ -17221,7 +17232,8 @@ function setupWorkerHandlers(
             config: ds.initConfig.traexAutoModel,
             leaseToken: msg.leaseToken,
           };
-          if (msg.outcome === 'capacity_queue') recordTraexAutoModelCircuitFailure(input);
+          if (msg.outcome === 'capacity_queue') recordTraexAutoModelCircuitFailure({ ...input,
+            observationKey: `${ds.session.sessionId}:${msg.turnId}:${msg.leaseToken ?? ''}` });
           else recordTraexAutoModelCircuitSuccess(input);
         } catch (error) {
           logger.error(`[${t}] Failed to persist TraeX auto-model circuit event: ${String(error)}`);

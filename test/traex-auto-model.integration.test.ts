@@ -13,6 +13,7 @@ import { readJsonLines } from './helpers/read-json-lines.js';
 import { t } from '../src/i18n/index.js';
 import { lookupCliDisplayName } from '../src/adapters/cli/display-names.js';
 import { restartInterruptionNote, restartInterruptionNotice } from '../src/services/restart-interruption.js';
+import { recordTraexAutoModelCircuitFailure, readTraexAutoModelCircuitState } from '../src/services/traex-auto-model-circuit.js';
 
 const interruptedTurn = { turnOpen: true, tasks: [] };
 const interruptionNote = () => restartInterruptionNote(interruptedTurn);
@@ -64,7 +65,7 @@ async function fixture(enabled: boolean, loadData: false | 'busy' | 'ordered' = 
   rpcPolicy?: { override?: boolean; global: boolean }, restoreWithoutBanner = false, startupExtraArgs?: string,
   freshStart = false, activityMode?: 'working' | 'queue-after-second' | 'delayed-first-queue', terminalDelayMs = 0,
   delaySecondModelOrderNoticeMs = 0, exitFirstReplacement = false, holdPreferredSuccessor = false,
-  circuitBreaker = false) {
+  circuitBreaker = false, circuitInitial?: { model?: string; protectedPool?: boolean }) {
   const root = mkdtempSync(join(tmpdir(), 'botmux-auto-model-'));
   roots.push(root);
   const dataDir = join(root, 'session');
@@ -73,6 +74,14 @@ async function fixture(enabled: boolean, loadData: false | 'busy' | 'ordered' = 
   const nativeId = '00000000-0000-7000-8000-000000000555';
   const rollouts = join(cliDir, 'sessions', '2026', '10', '21');
   mkdirSync(dataDir, { recursive: true });
+  const circuitConfig = { enabled: true as const, models: ['core', 'backup', 'last'], queueTimeoutMs: 5_000,
+    circuitBreaker: { enabled: true as const, failureThreshold: 1, openMs: 5_000, maxOpenMs: 5_000,
+      halfOpenMaxProbes: 1, successThreshold: 1 } };
+  if (circuitInitial?.protectedPool) {
+    for (const model of circuitConfig.models) {
+      recordTraexAutoModelCircuitFailure({ dataDir, appId: 'app_test', model, config: circuitConfig });
+    }
+  }
   mkdirSync(rollouts, { recursive: true });
   const rolloutPath = join(rollouts, `rollout-2026-10-21T00-00-00-${nativeId}.jsonl`);
   const historyPath = join(cliDir, 'history.jsonl');
@@ -293,8 +302,9 @@ if (__realSend) process.send = function (msg: any, callback?: any): boolean {
     ...(rpcPolicy ? { codexRpcInput: resolveCodexRpcInput('traex', rpcPolicy.override, rpcPolicy.global) } : {}),
     ...(enabled ? { traexAutoModel: { enabled: true, models: ['core', 'backup', 'last'], queueTimeoutMs: 5_000, switchCooldownMs: 5_000,
       reselectPerTurn,
-      ...(circuitBreaker ? { circuitBreaker: { enabled: true, failureThreshold: 1, openMs: 600_000,
-        maxOpenMs: 1_800_000, halfOpenMaxProbes: 1, successThreshold: 1 } } : {}),
+      ...(circuitBreaker ? { circuitBreaker: circuitInitial?.protectedPool ? circuitConfig.circuitBreaker
+        : { enabled: true, failureThreshold: 1, openMs: 600_000,
+          maxOpenMs: 1_800_000, halfOpenMaxProbes: 1, successThreshold: 1 } } : {}),
       ...(loadData ? { modelSettings: {
         core: { reasoningEffort: 'high', modelBackendVariant: 'standard' },
         backup: { reasoningEffort: 'xhigh', modelBackendVariant: 'standard' },
@@ -302,17 +312,40 @@ if (__realSend) process.send = function (msg: any, callback?: any): boolean {
       } } : {}),
     } } : {}),
     ...(circuitBreaker ? {
-      traexAutoModelCircuitModel: 'core',
+      traexAutoModelCircuitModel: circuitInitial?.model ?? 'core',
+      ...(circuitInitial?.protectedPool ? { traexAutoModelCircuitBlocked: true } : {}),
       traexAutoModelCircuitLease: { model: 'core', token: 'probe-token', acquiredAtMs: 1 },
     } : {}),
     larkAppId: 'app_test', larkAppSecret: 'secret' } satisfies DaemonToWorker;
   child.send(init);
   if (startupExtraArgs) await wait(() => messages.some(message => message.type === 'error' && message.message.includes('cannot be overridden')), 'rejected external model argv');
   else await wait(() => messages.some(message => message.type === 'prompt_ready'), 'startup prompt');
-  return { child, messages, wait, submissions, launches, release, nativeId, logs, rpcRequests, init, measurements, crash, fake };
+  return { child, messages, wait, submissions, launches, release, nativeId, logs, rpcRequests, init, measurements, crash, fake, dataDir };
 }
 
 describe('TraeX auto-model real Worker and PTY', () => {
+  it('starts a fresh native session on its circuit-selected backup without retrying the preferred model', async () => {
+    const f = await fixture(true, false, true, undefined, false, undefined,
+      true, 'working', 0, 0, false, false, true, { model: 'backup' });
+    f.child.send({ type: 'message', content: 'start on backup', turnId: 'om_backup' } satisfies DaemonToWorker);
+    await f.wait(() => rows(f.submissions).length === 1, 'fresh backup input');
+    expect(rows(f.launches).map(row => row.model)).toEqual(['backup']);
+    expect(rows(f.submissions)[0].model).toBe('backup');
+  }, 45_000);
+
+  it('keeps input outside a fully protected pool and automatically admits one probe after expiry', async () => {
+    const f = await fixture(true, false, false, undefined, false, undefined,
+      true, 'working', 0, 0, false, false, true, { protectedPool: true });
+    f.child.send({ type: 'message', content: 'held for circuit', turnId: 'om_held_circuit' } satisfies DaemonToWorker);
+    await new Promise(resolveWait => setTimeout(resolveWait, 500));
+    expect(rows(f.submissions)).toEqual([]);
+    await f.wait(() => rows(f.submissions).length === 1, 'automatic circuit retry');
+    const state = readTraexAutoModelCircuitState(f.dataDir).bots.app_test;
+    expect(Object.values(state).flatMap(entry => entry.probes)).toHaveLength(1);
+    expect(rows(f.submissions)[0]).toMatchObject({ model: 'core' });
+    expect(rows(f.launches)).toHaveLength(1);
+  }, 45_000);
+
   it('reports exact durable-circuit observations from real queue and terminal boundaries', async () => {
     const queued = await fixture(true, 'busy', false, undefined, false, undefined,
       false, undefined, 0, 0, false, false, true);

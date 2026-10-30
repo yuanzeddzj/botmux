@@ -131,6 +131,7 @@ import { commitGroupContextDispatchIntoPayload } from '../src/services/group-con
 import { groupContextEpoch } from '../src/services/group-context-prompt.js';
 import { closeLinkRefRuntime, initializeLinkRefRuntime } from '../src/services/link-ref-runtime.js';
 import * as sessionStore from '../src/services/session-store.js';
+import { readTraexAutoModelCircuitState } from '../src/services/traex-auto-model-circuit.js';
 
 function makeFakeWorker() {
   const worker = new EventEmitter() as any;
@@ -158,6 +159,34 @@ function makeDs(worker: any): DaemonSession {
 }
 
 async function flush(): Promise<void> { await new Promise(resolve => setTimeout(resolve, 0)); }
+
+it('persists a live TraeX capacity observation and rejects a replacement worker’s late observation', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'botmux-circuit-ipc-'));
+  const previousDir = config.session.dataDir;
+  config.session.dataDir = root;
+  try {
+    initWorkerPool({ sessionReply: vi.fn(), getSessionWorkingDir: () => '/repo',
+      getActiveCount: () => 1, closeSession: vi.fn() } as any);
+    const worker = makeFakeWorker();
+    const ds = makeDs(worker);
+    ds.session.cliId = 'traex';
+    ds.initConfig = { cliId: 'traex', traexAutoModel: { enabled: true,
+      models: ['core', 'backup'], queueTimeoutMs: 5_000, circuitBreaker: { enabled: true,
+        failureThreshold: 1, openMs: 600_000, maxOpenMs: 1_800_000,
+        halfOpenMaxProbes: 1, successThreshold: 1 } } } as any;
+    __testOnly_setupWorkerHandlers(ds, worker);
+    worker.emit('message', { type: 'traex_auto_model_circuit', outcome: 'capacity_queue', model: 'core', turnId: 'turn' });
+    await flush();
+    expect(readTraexAutoModelCircuitState(root).bots.app_test.core.state).toBe('open');
+    ds.worker = makeFakeWorker();
+    worker.emit('message', { type: 'traex_auto_model_circuit', outcome: 'capacity_queue', model: 'backup', turnId: 'old' });
+    await flush();
+    expect(readTraexAutoModelCircuitState(root).bots.app_test.backup).toBeUndefined();
+  } finally {
+    config.session.dataDir = previousDir;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 describe('native_input_consumed fencing', () => {
   beforeEach(() => { vi.clearAllMocks(); });

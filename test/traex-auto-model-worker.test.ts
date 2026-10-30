@@ -39,6 +39,28 @@ function harness(extra: Record<string, unknown> = {}) {
 const action = { kind: 'switch', reason: 'lowest_load', turnId: 'turn', fromModel: 'core', toModel: 'backup', toIndex: 1, loadPercent: 120 };
 
 describe('Auto-model circuit Worker observations', () => {
+  it('holds pending reselection in a protected pool and then keeps its healthy backup', () => {
+    const h = harness();
+    h.controller.config.circuitBreaker = { enabled: true, failureThreshold: 1, openMs: 600_000,
+      maxOpenMs: 1_800_000, halfOpenMaxProbes: 1, successThreshold: 1 };
+    h.controller.commitSwitch(action);
+    h.controller.endTurn('turn');
+    Object.assign(h.scope, { isPromptReady: true, queuedTypeAheadTurns: [],
+      pendingMessages: [{ content: 'independent next ask', turnId: 'next' }],
+      selectWorkerTraexCircuit: vi.fn(() => ({ model: 'core', allProtected: true })),
+      retryTraexCircuitAdmission: vi.fn() });
+    h.scope.executeTraexAutoModelSwitch = h.switchModel;
+    const reset = loadWorkerFunction<() => boolean>('resetTraexAutoModelBeforePendingTurn', h.scope);
+    expect(reset()).toBe(true);
+    expect(h.scope.pendingMessages).toHaveLength(1);
+    expect(h.scope.restartCliProcess).not.toHaveBeenCalled();
+    h.scope.selectWorkerTraexCircuit.mockReturnValue({ model: 'backup' });
+    expect(reset()).toBe(false);
+    expect(h.controller.currentModel()).toBe('backup');
+    expect(h.controller.currentTurnId()).toBe('next');
+    expect(h.scope.restartCliProcess).not.toHaveBeenCalled();
+  });
+
   it('reports confirmed capacity once and carries the exact recovery lease', () => {
     const send = vi.fn();
     const scope = {
