@@ -395,17 +395,24 @@ describe('buildTurnReplyAskElements — askOptionLayout 受控', () => {
     setAskOptionLayoutLookup(() => undefined);
   });
 
-  it('默认 compact：选项每行 3 个（flow + auto 列）', () => {
+  it('默认 auto：4 个短选项自动竖排', () => {
     setAskOptionLayoutLookup(() => undefined);
     const els = buildTurnReplyAskElements(makeInlineAsk());
     const rows = els.filter(el => el.tag === 'column_set');
-    expect(rows).toHaveLength(2);
-    expect(rows[0].flex_mode).toBe('flow');
-    expect(rows[0].columns).toHaveLength(3);
-    expect(rows[1].columns).toHaveLength(1);
+    expect(rows).toHaveLength(4);
     for (const row of rows) {
-      for (const col of row.columns) expect(col.width).toBe('auto');
+      expect(row.flex_mode).toBe('none');
+      expect(row.columns).toHaveLength(1);
+      expect(row.columns[0]).toMatchObject({ width: 'weighted', weight: 1 });
     }
+  });
+
+  it('显式 compact：选项每行 3 个（flow + auto 列）', () => {
+    setAskOptionLayoutLookup(() => ({ config: { askOptionLayout: 'compact' } }));
+    const rows = buildTurnReplyAskElements(makeInlineAsk()).filter(el => el.tag === 'column_set');
+    expect(rows).toHaveLength(2);
+    expect(rows.map(row => row.columns.length)).toEqual([3, 1]);
+    for (const row of rows) for (const column of row.columns) expect(column.width).toBe('auto');
   });
 
   it('vertical：每个选项一行（单列 weighted、不被同排挤压）', () => {

@@ -8791,8 +8791,8 @@ ipcRoute('PUT', '/api/bot-reply-style', requireBoundBot(async (req, res) => {
   }
 }));
 
-// Per-bot ask 选项按钮布局。Body `{ askOptionLayout: 'compact' | 'vertical' | null }`。
-// 'compact'（默认）与 null 都会从 bots.json 删除该键（稀疏存储，缺省即紧凑）；
+// Per-bot ask 选项按钮布局。Body `{ askOptionLayout: 'auto' | 'compact' | 'vertical' | null }`。
+// 'auto'（默认）与 null 都会从 bots.json 删除该键（稀疏存储，缺省即自适应）；
 // 非法值直接 400——读取路径 fail-soft，但写入路径要让笔误显式失败。
 ipcRoute('PUT', '/api/bot-ask-option-layout', requireBoundBot(async (req, res) => {
   let body: unknown;
@@ -8810,7 +8810,7 @@ ipcRoute('PUT', '/api/bot-ask-option-layout', requireBoundBot(async (req, res) =
   if (raw !== null && raw !== undefined && !isAskOptionLayout(raw)) {
     return jsonRes(res, 400, { ok: false, error: 'invalid_layout' });
   }
-  const next = raw === 'vertical' ? 'vertical' : null;
+  const next = raw === 'vertical' || raw === 'compact' ? raw : null;
   try {
     const persisted = await rmwBotEntry(cachedLarkAppId, (entry: any) => {
       if (next) entry.askOptionLayout = next;

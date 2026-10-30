@@ -7583,6 +7583,7 @@ ${SEND_HELP_BODY}
   input-capture register|inspect|revoke|revoke-set --bot <appId> --session <id> ...
   ask buttons --questions-file <file>   多题/文本/数值表单，支持预选；一次提交，返回 answers/inputs JSON
   ask buttons --answerer <ou_id>       仅指定答题人可提交（不授予业务批准权）
+  ask buttons --risk                   使用橙色变更确认样式和纵向操作按钮；仅改变展示
   ask buttons [--multi] --options "a,b" "<问题>"
                                        把选择题做成按钮卡片抛给飞书；--multi 返回逗号分隔的多个 key
                                        （无 hook 的 CLI 用它把决策引到人；也可省略 buttons 走裸别名）
@@ -16340,7 +16341,8 @@ async function cmdAsk(sub: string, rest: string[]): Promise<void> {
   const timeoutRaw = argValue(rest, '--timeout');
   const useJson = rest.includes('--json') || questionsFile !== undefined;
   const multiSelect = rest.includes('--multi');
-  const positionalArgs = positionals(rest, ['--json', '--multi']);
+  const risk = rest.includes('--risk');
+  const positionalArgs = positionals(rest, ['--json', '--multi', '--risk']);
 
   let options;
   let questions;
@@ -16400,6 +16402,7 @@ async function cmdAsk(sub: string, rest: string[]): Promise<void> {
     timeoutMs,
     // Stable invocation identity: reconnect without posting a second card.
     originKind: 'explicit',
+    ...(risk ? { risk: true } : {}),
     ...(answererOpenId ? { answererOpenId } : {}),
     requestId: randomUUID(),
     ...(liveAskOrigin?.turnId ? { originTurnId: liveAskOrigin.turnId } : {}),

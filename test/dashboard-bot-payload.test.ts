@@ -185,7 +185,9 @@ describe('dashboard bot payload helpers', () => {
       .toMatchObject({ askOptionLayout: 'vertical' });
     expect(botDefaultsPayload({ larkAppId: 'app' }, { askOptionLayout: 'compact' }))
       .toMatchObject({ askOptionLayout: 'compact' });
-    // 非法手改值 fail-soft → null（compact 缺省），不原样透传给表单态
+    expect(botDefaultsPayload({ larkAppId: 'app' }, { askOptionLayout: 'auto' }))
+      .toMatchObject({ askOptionLayout: 'auto' });
+    // 非法手改值 fail-soft → null（auto 缺省），不原样透传给表单态
     expect(botDefaultsPayload({ larkAppId: 'app' }, { askOptionLayout: 'secret-looking-invalid' }))
       .toMatchObject({ askOptionLayout: null });
     expect(botDefaultsPayload({ larkAppId: 'app' }, {}))

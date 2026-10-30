@@ -129,6 +129,12 @@ describe('parseAskBody — validation', () => {
 });
 
 describe('parseAskBody — supported request semantics', () => {
+  it('accepts an explicit visual risk flag and rejects non-booleans', () => {
+    expect(parseAskBody(validBody({ risk: true }))).toMatchObject({ risk: true });
+    expect(parseAskBody(validBody({ risk: false }))).toMatchObject({ risk: false });
+    expect(parseAskBody(validBody({ risk: 'yes' }))).toEqual({ error: 'bad_risk' });
+  });
+
   it('rejects an unsupported request contract instead of reducing it to an ordinary Ask', () => {
     expect(parseAskBody(validBody({
       requestId: 'original-request', originKind: 'explicit',

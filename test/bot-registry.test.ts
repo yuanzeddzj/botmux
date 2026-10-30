@@ -2847,7 +2847,7 @@ describe('cardActionAckTimeoutMs bot config', () => {
 // ─── askOptionLayout 冷读线程化（PR #1587 评审阻断项回归） ─────────────────
 // 写侧（PUT → rmwBotEntry）与热更新早已走通；这里的断点是 parser：磁盘上的
 // 字段必须被 parseBotConfigsFromText / loadBotConfigAtIndex 读进 BotConfig，
-// 否则 daemon 重启后配置静默回退 compact，而 Dashboard 离线恢复行仍显示原值。
+// 否则 daemon 重启后配置静默回退 auto，而 Dashboard 离线恢复行仍显示原值。
 describe('parseBotConfigsFromText — askOptionLayout 冷读', () => {
   let mod: Awaited<ReturnType<typeof freshImport>>;
   let fsMock: { existsSync: ReturnType<typeof vi.fn>; readFileSync: ReturnType<typeof vi.fn>; statSync: ReturnType<typeof vi.fn> };
@@ -2876,13 +2876,15 @@ describe('parseBotConfigsFromText — askOptionLayout 冷读', () => {
     expect(cfg.askOptionLayout).toBe('vertical');
   });
 
-  it('未配置 / 显式 compact / 非法手改值均读为缺省（compact 行为）', () => {
-    const [unset, explicit, bogus] = mod.parseBotConfigsFromText(JSON.stringify([
+  it('未配置 / 显式 auto / 非法手改值均读为缺省（auto 行为）', () => {
+    const [unset, auto, explicit, bogus] = mod.parseBotConfigsFromText(JSON.stringify([
       { larkAppId: 'a', larkAppSecret: 's' },
-      { larkAppId: 'b', larkAppSecret: 's', askOptionLayout: 'compact' },
-      { larkAppId: 'c', larkAppSecret: 's', askOptionLayout: 'sideways' },
+      { larkAppId: 'b', larkAppSecret: 's', askOptionLayout: 'auto' },
+      { larkAppId: 'c', larkAppSecret: 's', askOptionLayout: 'compact' },
+      { larkAppId: 'd', larkAppSecret: 's', askOptionLayout: 'sideways' },
     ]));
     expect(unset.askOptionLayout).toBeUndefined();
+    expect(auto.askOptionLayout).toBe('auto');
     expect(explicit.askOptionLayout).toBe('compact');
     expect(bogus.askOptionLayout).toBeUndefined();
   });

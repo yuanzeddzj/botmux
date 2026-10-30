@@ -199,6 +199,35 @@ describe('botmux ask — CLI boundary', () => {
     }
   });
 
+  it('--risk 只把显式视觉风险信号传给 daemon，不改变问题和返回值', async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'botmux-ask-cli-'));
+    tempDirs.push(dataDir);
+    let requestBody: Record<string, unknown> | undefined;
+    const server = createServer(async (req, res) => {
+      requestBody = await readRequestBodyJson<Record<string, unknown>>(req, { strict: true });
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ kind: 'answered', answers: [['deploy']], by: 'ou_test', comment: null, timedOut: false }));
+    });
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    try {
+      const registryDir = join(dataDir, 'dashboard-daemons');
+      mkdirSync(registryDir, { recursive: true });
+      writeFileSync(join(registryDir, 'cli_test.json'), JSON.stringify({
+        larkAppId: 'cli_test', ipcPort: (server.address() as AddressInfo).port, lastHeartbeat: Date.now(),
+      }));
+      const result = await runAsk(dataDir, [
+        'ask', 'buttons', '--risk', '--options', 'deploy=确认扩容,abort=终止任务', '是否扩容？',
+      ]);
+      expect(result).toMatchObject({ status: 0, stdout: 'deploy\n', stderr: '' });
+      expect(requestBody).toMatchObject({ risk: true, prompt: '是否扩容？' });
+      expect(requestBody?.options).toEqual([
+        { key: 'deploy', label: '确认扩容' }, { key: 'abort', label: '终止任务' },
+      ]);
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+    }
+  });
+
   it('--multi --json 恰好选 1 项时 selected 恒为 null（不因形状退化成 key）', async () => {
     // 回归护栏：`selected` 是「单问单选」的向后兼容值（toLegacySelected 的形状判据
     // 恰好 1 问 × 1 key）。多选恰好选 1 项时形状同样是 1×1，若不显式清零，`selected`

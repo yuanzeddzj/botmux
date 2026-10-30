@@ -2,7 +2,7 @@ import { hasAskForm } from '../../core/ask-form.js';
 import { buildAskFormElements } from './ask-form-elements.js';
 import type { ReplyCardAsk } from '../../services/turn-reply-card.js';
 import { t, type Locale } from '../../i18n/index.js';
-import { askOptionLayoutForBot } from './ask-option-layout.js';
+import { askOptionLayoutForBot, resolveAskOptionLayout } from './ask-option-layout.js';
 
 const safe = (text: string) => text.replace(/<at\b[^>]*>[\s\S]*?<\/at>/gi, '[mention]')
   .replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -28,6 +28,9 @@ export function buildTurnReplyAskElements(entry: ReplyCardAsk, locale: Locale = 
     columns: [{ tag: 'column', width: 'weighted', weight: 1, elements: [b] }],
   });
   const optionLayout = askOptionLayoutForBot(ask.larkAppId);
+  if (ask.risk && !entry.result) {
+    elements.push({ tag: 'markdown', content: t('card.ask.risk_notice', undefined, locale) });
+  }
   ask.questions.forEach((q, i) => {
     elements.push({ tag: 'markdown', content: safe(textReplyRequired && q.options.length
       ? `${q.prompt}\n\n${q.options.map(o => o.label).join(' / ')}` : q.prompt) });
@@ -40,7 +43,7 @@ export function buildTurnReplyAskElements(entry: ReplyCardAsk, locale: Locale = 
       ),
       ...(submit ? { icon: { tag: 'standard_icon', token: selected.has(option.key) ? 'check_outlined' : 'rectangle_outlined' } } : {}),
     }));
-    if (optionLayout === 'vertical') {
+    if (resolveAskOptionLayout(optionLayout, q.options.map(option => option.label), ask.risk === true) === 'vertical') {
       for (const b of buttons) elements.push(verticalRow(b));
     } else {
       for (let start = 0; start < buttons.length; start += 3) elements.push(row(buttons.slice(start, start + 3)));

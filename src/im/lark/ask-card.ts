@@ -15,7 +15,7 @@ import { AskDispatchError } from '../../core/ask-types.js';
 import { getAskSnapshot, submitAsk, submitAskForm, toggleAsk, tryResolveAsk } from '../../core/ask-broker.js';
 import { logger } from '../../utils/logger.js';
 import { t, localeForBot, type Locale } from '../../i18n/index.js';
-import { askOptionLayoutForBot, type AskOptionLayout } from './ask-option-layout.js';
+import { askOptionLayoutForBot, resolveAskOptionLayout, type RenderedAskOptionLayout } from './ask-option-layout.js';
 import { replyMessage, sendMessage, sendUserMessage, updateMessage, uploadFile } from './client.js';
 import { TRANSIENT_LARK_CODES } from './api-gate.js';
 import { TURN_REPLY_CARD_MAX_BYTES, turnReplyCardRequestBytes } from './turn-reply-card-size.js';
@@ -472,25 +472,17 @@ function renderAskCardWithCap(
   const locale = localeForBot(ask.larkAppId);
   if (hasAskForm(ask.questions)) {
     const capped = { ...ask, questions: ask.questions.map(q => ({ ...q, prompt: capPrompt(q.prompt, promptCap, locale) })) };
+    const formElements = buildAskFormElements(capped, locale, result, Math.min(300, promptCap));
+    if (ask.risk && !result) formElements.unshift(riskNotice(locale));
     return JSON.stringify({ schema: '2.0', config: { wide_screen_mode: true },
-      header: { title: { tag: 'plain_text', content: 'botmux ask' }, template: result ? 'grey' : 'blue' },
-      body: { elements: buildAskFormElements(capped, locale, result, Math.min(300, promptCap)) } });
+      header: askHeader(ask, result, locale), body: { elements: formElements } });
   }
   const optionLayout = askOptionLayoutForBot(ask.larkAppId);
   const deadline = new Date(ask.deadlineAt).toLocaleString('zh-CN');
   const status = result ? settleStatus(result, ask, locale) : undefined;
   const confirmEmptyArmed = !!opts?.confirmEmptyArmed && !status;
 
-  // 截止时间 + 可答复人 字段行（settled 与 unsettled 均展示）
-  const metaDiv = {
-    tag: 'div',
-    fields: [
-      { is_short: true, text: { tag: 'lark_md', content: `**${t('card.ask.field.deadline', undefined, locale)}**\n${escapeMd(deadline)}` } },
-      { is_short: true, text: { tag: 'lark_md', content: `**${t('card.ask.field.answerable', undefined, locale)}**\n${approverSummary(ask, locale)}` } },
-    ],
-  };
-
-  const elements: Array<Record<string, unknown>> = [metaDiv];
+  const elements: Array<Record<string, unknown>> = [];
   if (ask.deliveryTarget) {
     elements.push({ tag: 'note', elements: [{ tag: 'plain_text',
       content: t('card.ask.document_origin', {
@@ -508,7 +500,7 @@ function renderAskCardWithCap(
         tag: 'div',
         text: {
           tag: 'lark_md',
-          content: `**${t('card.ask.question_n', { n: i + 1 }, locale)}**\n${escapeQuestion(capPrompt(questionPrompt(ask, i, true), promptCap, locale))}`,
+          content: questionContent(ask, i, capPrompt(questionPrompt(ask, i, true), promptCap, locale), locale),
         },
       });
     }
@@ -519,7 +511,8 @@ function renderAskCardWithCap(
     });
   } else {
     // 未 settle：只用 action/buttons，避免 form+select 被飞书服务端静默丢弃。
-    elements.push({ tag: 'hr' });
+    if (ask.risk) elements.push(riskNotice(locale));
+    if (elements.length > 0) elements.push({ tag: 'hr' });
 
     const textReplyRequired = ask.questions.some(q => q.inputMode === 'text');
     const requiresSubmit = textReplyRequired || ask.questions.length > 1 || ask.questions.some((q) => q.multiSelect || q.defaultSelectedKeys !== undefined);
@@ -537,7 +530,7 @@ function renderAskCardWithCap(
         tag: 'div',
         text: {
           tag: 'lark_md',
-          content: `**${t('card.ask.question_n', { n: i + 1 }, locale)}**\n${escapeQuestion(prompt)}`,
+          content: questionContent(ask, i, prompt, locale),
         },
       });
 
@@ -549,7 +542,7 @@ function renderAskCardWithCap(
           tag: 'plain_text',
           content: requiresSubmit ? optionLabel(q.multiSelect, selected.has(opt.key), opt.label) : opt.label,
         },
-        type: selected.has(opt.key) ? 'primary' : 'default',
+        type: optionButtonType(ask, opt.key, opt.label, selected.has(opt.key)),
         value: requiresSubmit
           ? {
               action: ASK_TOGGLE_ACTION,
@@ -565,7 +558,9 @@ function renderAskCardWithCap(
               key: opt.key,
             },
       }));
-      appendActionRows(elements, optionButtons, optionLayout);
+      appendActionRows(elements, optionButtons, resolveAskOptionLayout(
+        optionLayout, q.options.map(option => option.label), ask.risk === true,
+      ));
     }
 
     if (requiresSubmit && !textReplyRequired) {
@@ -606,24 +601,17 @@ function renderAskCardWithCap(
       });
     }
 
-    // 自定义回复提示：选项都不满意时，直接在话题里回复一句文字即可当答案。
+    // 将辅助说明和元信息收在底部，避免它们抢过问题与操作的视觉层级。
     elements.push({ tag: 'hr' });
     elements.push({
-      tag: 'note',
-      elements: [
-        { tag: 'plain_text', content: t(ask.deliveryTarget ? 'card.ask.document_reply_hint'
-          : ask.originKind === 'native-user-input-async' ? 'card.ask.async_reply_hint'
-            : textReplyRequired ? 'card.ask.text_reply_hint' : 'card.ask.custom_reply_hint', undefined, locale) },
-      ],
+      tag: 'div',
+      text: { tag: 'lark_md', content: pendingFooter(ask, deadline, textReplyRequired, locale) },
     });
   }
 
   return JSON.stringify({
     config: { wide_screen_mode: true },
-    header: {
-      template: result ? templateForResult(result) : 'blue',
-      title: { tag: 'plain_text', content: result ? t('card.ask.title_done', undefined, locale) : t('card.ask.title', undefined, locale) },
-    },
+    header: askHeader(ask, result, locale),
     elements,
   });
 }
@@ -768,7 +756,7 @@ function settleStatus(result: AskResult, ask: PendingAsk, locale?: Locale): stri
     // 自定义回复（替代语义）：没有任何选中项、只有一段自定义文字 → 单独渲染。
     const hasSelection = result.answers.some((keys) => keys.length > 0);
     if (result.comment && !hasSelection) {
-      return `**${t('card.ask.custom_reply', undefined, locale)}**\n${escapeMd(result.comment)}\n${t('common.operator', { by: escapeMd(short(result.by, 28)) }, locale)}`;
+      return `**${t('card.ask.custom_reply', undefined, locale)}**\n${escapeMd(result.comment)}\n${confirmedBy(ask, result.by, locale)}`;
     }
     // 每问一行：问题N：<选中标签>
     const lines = result.answers.map((keys, i) => {
@@ -777,9 +765,11 @@ function settleStatus(result: AskResult, ask: PendingAsk, locale?: Locale): stri
       const labels = keys.map((key) => q.options.find((o) => o.key === key)?.label ?? key);
       return t('card.ask.q_summary_line', { n: i + 1, labels: labels.join(', ') }, locale);
     });
-    const summary = lines.join('\n');
+    const summary = result.answers.length === 1 && ask.questions.length === 1
+      ? lines[0]!.replace(/^.*?[:：]/, '')
+      : lines.join('\n');
     const commentLine = result.comment ? `\n${t('card.ask.supplement', { comment: escapeMd(result.comment) }, locale)}` : '';
-    return `**${t('card.ask.selected', undefined, locale)}**\n${escapeMd(summary)}${commentLine}\n${t('common.operator', { by: escapeMd(short(result.by, 28)) }, locale)}`;
+    return `**${t('card.ask.selected', undefined, locale)}**\n${escapeMd(summary)}${commentLine}\n${confirmedBy(ask, result.by, locale)}`;
   }
   if (result.kind === 'timedOut') {
     return `**${t('card.ask.timed_out', undefined, locale)}**`;
@@ -790,6 +780,65 @@ function settleStatus(result: AskResult, ask: PendingAsk, locale?: Locale): stri
       ? t('card.ask.invalidated_answer_undelivered', undefined, locale)
       : escapeMd(result.reason);
   return `**${t('card.ask.invalidated', undefined, locale)}**\n${detail}`;
+}
+
+function askHeader(
+  ask: PendingAsk,
+  result: AskResult | undefined,
+  locale?: Locale,
+): { template: string; title: { tag: 'plain_text'; content: string } } {
+  let key: string;
+  if (!result) key = ask.risk ? 'card.ask.title_risk' : 'card.ask.title';
+  else if (result.kind === 'answered') key = ask.risk ? 'card.ask.title_risk_answered' : 'card.ask.title_answered';
+  else if (result.kind === 'timedOut') key = 'card.ask.title_timed_out';
+  else key = 'card.ask.title_invalidated';
+  return {
+    template: result ? templateForResult(result) : ask.risk ? 'orange' : 'blue',
+    title: { tag: 'plain_text', content: t(key, undefined, locale) },
+  };
+}
+
+function riskNotice(locale?: Locale): Record<string, unknown> {
+  return {
+    tag: 'div',
+    text: { tag: 'lark_md', content: t('card.ask.risk_notice', undefined, locale) },
+  };
+}
+
+function questionContent(ask: PendingAsk, index: number, prompt: string, locale?: Locale): string {
+  const rendered = escapeQuestion(prompt);
+  return ask.questions.length === 1
+    ? rendered
+    : `**${t('card.ask.question_n', { n: index + 1 }, locale)}**\n${rendered}`;
+}
+
+function pendingFooter(
+  ask: PendingAsk,
+  deadline: string,
+  textReplyRequired: boolean,
+  locale?: Locale,
+): string {
+  const hint = t(ask.deliveryTarget ? 'card.ask.document_reply_hint'
+    : ask.originKind === 'native-user-input-async' ? 'card.ask.async_reply_hint'
+      : textReplyRequired ? 'card.ask.text_reply_hint' : 'card.ask.custom_reply_hint', undefined, locale);
+  return `${hint}\n${t('card.ask.field.deadline', undefined, locale)}：${escapeMd(deadline)} · `
+    + `${t('card.ask.field.answerable', undefined, locale)}：${approverSummary(ask, locale)}`;
+}
+
+function confirmedBy(ask: PendingAsk, openId: string, locale?: Locale): string {
+  const actor = ask.originKind?.startsWith('host_cross_principal_')
+    ? t('card.ask.answerable_designated_member', undefined, locale)
+    : /^ou_[A-Za-z0-9_-]+$/.test(openId) ? `<at id=${openId}></at>` : escapeMd(short(openId, 28));
+  return t('card.ask.confirmed_by', { by: actor }, locale);
+}
+
+function optionButtonType(ask: PendingAsk, key: string, label: string, selected: boolean): string {
+  if (selected) return 'primary';
+  if (ask.risk && /(?:^|[_-])(?:abort|rollback|delete|stop|cancel|reject|deny)(?:$|[_-])|终止|回滚|删除|停止|取消|拒绝/i.test(`${key} ${label}`)) {
+    return 'danger';
+  }
+  if (/推荐|recommended/i.test(label)) return 'primary';
+  return 'default';
 }
 
 function templateForResult(result: AskResult): string {
@@ -834,7 +883,7 @@ function optionLabel(multiSelect: boolean, selected: boolean, label: string): st
 function appendActionRows(
   elements: Array<Record<string, unknown>>,
   actions: Array<Record<string, unknown>>,
-  layout: AskOptionLayout,
+  layout: RenderedAskOptionLayout,
 ): void {
   if (layout === 'vertical') {
     // 竖放：一行一按钮。单列 column_set（flex_mode:'none' + weighted 列宽）让按钮

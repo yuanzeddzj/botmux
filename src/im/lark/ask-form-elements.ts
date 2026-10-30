@@ -14,10 +14,7 @@ export function buildAskFormElements(ask: PendingAsk, locale: Locale, result?: A
     if (/[\uD800-\uDBFF]$/.test(head)) head = head.slice(0, -1);
     return head + (en ? '… (full answer returned to caller)' : '…（完整答案已返回调用方）');
   };
-  const elements: Array<Record<string, any>> = [{ tag: 'markdown', content:
-    `${en ? 'Deadline' : '等待截止'}：${new Date(ask.deadlineAt).toLocaleString(en ? 'en-US' : 'zh-CN')}\n`
-    + (ask.answererOpenId ? (en ? 'Only the designated respondent may submit.' : '仅指定答题人可提交。')
-      : (en ? 'Members allowed to talk to this bot may answer; this does not grant business approval.' : '本会话可对话成员可作答；不代表具备业务批准权。')) }];
+  const elements: Array<Record<string, any>> = [];
   if (result) {
     for (const [i, q] of ask.questions.entries()) {
       const value = result.kind === 'answered'
@@ -26,7 +23,7 @@ export function buildAskFormElements(ask: PendingAsk, locale: Locale, result?: A
     }
     if (result.kind === 'answered') {
       if (result.comment) elements.push({ tag: 'markdown', content: safe(displayValue(result.comment)) });
-      elements.push({ tag: 'markdown', content: `${en ? 'Submitted by' : '已提交，答题人'}：${safe(result.by)}` });
+      elements.push({ tag: 'markdown', content: en ? 'Answer recorded.' : '答复已记录。' });
     } else elements.push({ tag: 'markdown', content: result.kind === 'timedOut'
       ? (en ? 'Timed out — no approval was given.' : '等待已超时，未获得确认。')
       : `${en ? 'Invalidated' : '已失效'}：${safe(displayValue(result.reason))}` });
@@ -50,11 +47,11 @@ export function buildAskFormElements(ask: PendingAsk, locale: Locale, result?: A
     }
   });
   fields.push({ tag: 'button', name: 'ask_form_submit', type: 'primary', form_action_type: 'submit',
-    text: plain(en ? 'Submit and continue' : '提交并继续'),
+    text: plain(ask.risk ? (en ? 'Confirm change' : '确认变更') : (en ? 'Submit and continue' : '提交并继续')),
     behaviors: [{ type: 'callback', value: { action: 'ask_form_submit', ask_id: ask.askId, nonce: ask.nonce } }] });
   elements.push({ tag: 'form', name: 'ask_form', elements: fields });
   elements.push({ tag: 'markdown', text_size: 'notation', content: en
-    ? 'Submit choices and inputs together. A chat reply replaces the whole form; unsent defaults are not answers.'
-    : '选项与输入一起提交。也可在话题里写完整答案替代整张表单；未提交的预选不算回答。' });
+    ? `Submit choices and inputs together. A chat reply replaces the whole form; unsent defaults are not answers.\nConfirm by: ${new Date(ask.deadlineAt).toLocaleString('en-US')} · ${ask.answererOpenId ? 'Only the designated respondent can act.' : 'Members allowed to talk to this Bot can act.'}`
+    : `选项与输入一起提交。也可在话题里写完整答案替代整张表单；未提交的预选不算回答。\n确认截止：${new Date(ask.deadlineAt).toLocaleString('zh-CN')} · ${ask.answererOpenId ? '仅指定成员可操作。' : '本群可对话成员可操作。'}` });
   return elements;
 }

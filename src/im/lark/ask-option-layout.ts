@@ -1,6 +1,7 @@
 /**
  * `botmux ask` 选项按钮的 per-bot 布局：
  *
+ *   auto     — 短选项紧凑排列；长选项和较多选项自动竖排
  *   compact  — 按行自动换行排列（独立卡为 `action` 行，实时卡内嵌为 `flow` 行）
  *   vertical — 每行 1 个按钮，各自包在单列 `column_set` 里单列排布，
  *              长选项标签不被挤压换行
@@ -11,10 +12,25 @@
  * 加载时把 lookup 推进来，渲染侧经它按 larkAppId 读配置。
  */
 
-export const ASK_OPTION_LAYOUTS = ['compact', 'vertical'] as const;
+export const ASK_OPTION_LAYOUTS = ['auto', 'compact', 'vertical'] as const;
 export type AskOptionLayout = (typeof ASK_OPTION_LAYOUTS)[number];
+export type RenderedAskOptionLayout = Exclude<AskOptionLayout, 'auto'>;
 
-export const DEFAULT_ASK_OPTION_LAYOUT: AskOptionLayout = 'compact';
+export const DEFAULT_ASK_OPTION_LAYOUT: AskOptionLayout = 'auto';
+
+/** Resolve the configured preference into a concrete card layout. Risk cards
+ * always use full-width actions; ordinary cards stay compact only while the
+ * choices are few and short enough to scan as one row. */
+export function resolveAskOptionLayout(
+  layout: AskOptionLayout,
+  labels: readonly string[],
+  risk = false,
+): RenderedAskOptionLayout {
+  if (risk || layout === 'vertical') return 'vertical';
+  if (layout === 'compact') return 'compact';
+  const longest = Math.max(0, ...labels.map(label => [...label].length));
+  return labels.length > 3 || longest > 12 ? 'vertical' : 'compact';
+}
 
 /** 配置体积极小（一个枚举值），1KB 上限绰绰有余；防止已认证的 Dashboard
  *  请求在 daemon / dashboard 任一侧缓冲任意大的排版配置 payload。 */
@@ -50,7 +66,7 @@ export function setAskOptionLayoutLookup(lookup: BotLookup): void {
 
 /**
  * 解析某 bot 当前生效的布局。lookup 未注册 / bot 未知 / 值非法 / lookup 抛错，
- * 一律回退 compact——与 localeForBot 同款防御。
+ * 一律回退 auto——与 localeForBot 同款防御。
  */
 export function askOptionLayoutForBot(larkAppId: string | undefined): AskOptionLayout {
   if (!larkAppId || !botLookup) return DEFAULT_ASK_OPTION_LAYOUT;

@@ -1353,6 +1353,8 @@ description: 在当前飞书/Lark 会话里向用户发起阻塞式选择题或�
 
 是否需要用户选择或批准，由当前任务授权和具体操作规则决定。已有授权覆盖的常规文件修改、只读 API 查询和执行步骤应继续推进；具体流程明确要求重新确认时，遵循该要求。
 
+发布、扩容、回滚、删除数据、权限变更或其它会改变运行状态的高风险确认，调用时加 \`--risk\`。它只切换成橙色变更确认样式和纵向操作按钮，不放宽权限、不代表用户同意，也不替代操作本身要求的审批。普通需求选择不要加，避免把每张卡都渲染成警告。
+
 ## 什么时候用
 
 - 具体操作规则要求批准，且当前授权尚未满足要求
@@ -1406,7 +1408,7 @@ CLI 能力 \`ask_form_v1\` 只表示本地 CLI 理解表单；CLI 和 daemon 都
 如果用户需要看到选择结果或后续结论，必须在 ask 返回后显式调用 \`botmux send\`。\`botmux ask buttons\` 只负责发卡片、阻塞等待、把选择写到当前 shell 的 stdout；它**不会自动把 stdout 发回飞书**。
 
 \`\`\`bash
-choice=$(botmux ask buttons --options "deploy=继续发布,rollback=回滚,abort=中止" "线上 latency 涨了 30%，下一步怎么处理？")
+choice=$(botmux ask buttons --risk --options "deploy=继续发布（推荐）,rollback=回滚,abort=中止" "线上 latency 涨了 30%，下一步怎么处理？")
 case "$choice" in
   deploy) botmux send --mention-back "收到选择：继续发布，开始执行发布。" ;;
   rollback) botmux send --mention-back "收到选择：回滚，开始执行回滚。" ;;

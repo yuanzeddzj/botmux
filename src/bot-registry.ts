@@ -2182,8 +2182,8 @@ export interface BotConfig {
    */
   replyStyle?: ReplyStyleConfig;
   /**
-   * `botmux ask` 选项按钮布局：'compact'（默认，按行自动换行）或 'vertical'
-   * （每行 1 个，长标签更易读）。手改的非法值在读取时 fail-soft 回退 compact，
+   * `botmux ask` 选项按钮布局：'auto'（默认，按选项长度自适应）、'compact'
+   * （按行自动换行）或 'vertical'（每行 1 个）。手改的非法值 fail-soft 回退 auto，
    * 不影响发卡；卡片在 daemon 进程内渲染，改动即时生效，无需重启 worker。
    */
   askOptionLayout?: AskOptionLayout;

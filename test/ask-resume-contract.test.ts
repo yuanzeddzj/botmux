@@ -93,6 +93,15 @@ function persistedFor(
 }
 
 describe('clause 1 — canonical identity is unique end-to-end (codex P1-1)', () => {
+  it('persists the explicit visual risk signal without changing the schema or answer contract', () => {
+    const store = createAskPersistStore(join(dataDir, 'asks'));
+    const row = persistedFor('cli_app', 'session', 'hook', 'risk-style');
+    row.risk = true;
+    store.put(row);
+    expect(store.list()).toHaveLength(1);
+    expect(store.list()[0]).toMatchObject({ v: 2, risk: true, questions: row.questions });
+  });
+
   it('production-length keys with different requestIds get DISTINCT persisted files', () => {
     // Reproduces the 80-char filename truncation collision: with a real bot id
     // (cli_ + 32 hex = 36 chars) and a uuid sessionId, the joined key pushes the

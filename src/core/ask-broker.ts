@@ -334,6 +334,7 @@ function registerAskInternal(input: CreateAskInput, hostManaged: boolean, signal
       sessionId: input.sessionId,
       chatType: input.chatType,
       answererOpenId: input.answererOpenId,
+      risk: input.risk === true,
       deliveryTarget: input.deliveryTarget ? { ...input.deliveryTarget } : undefined,
       questions: input.questions,
       replyCardTarget: input.replyCardTarget,
@@ -408,6 +409,7 @@ function sameIdentity(ask: InternalPending, input: CreateAskInput): boolean {
     ask.rootMessageId === input.rootMessageId &&
     ask.originKind === (input.originKind ?? 'hook') &&
     ask.answererOpenId === input.answererOpenId &&
+    ask.risk === (input.risk === true) &&
     JSON.stringify(ask.deliveryTarget) === JSON.stringify(input.deliveryTarget) &&
     questionsShape(ask.questions) === questionsShape(input.questions)
   );
@@ -591,6 +593,7 @@ function persistFromInternal(ask: InternalPending): void {
     sessionId: ask.sessionId,
     chatType: ask.chatType,
     answererOpenId: ask.answererOpenId,
+    ...(ask.risk ? { risk: true } : {}),
     deliveryTarget: ask.deliveryTarget,
     questions: ask.questions,
     createdAt: ask.createdAt,
@@ -984,6 +987,7 @@ export function restorePersistedAsks(now: number = Date.now(), larkAppId?: strin
       sessionId: p.sessionId,
       chatType: p.chatType,
       answererOpenId: p.answererOpenId,
+      risk: p.risk === true,
       deliveryTarget: p.deliveryTarget,
       questions: p.questions,
       createdAt: p.createdAt,

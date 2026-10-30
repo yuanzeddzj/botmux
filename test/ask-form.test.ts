@@ -201,6 +201,18 @@ describe('production broker and card callback', () => {
     expect(submit).not.toHaveProperty('action_type');
     expect(submitAskForm({ ...args(), values })).toBe('accepted'); await waiting;
   });
+  it('uses the change-confirmation hierarchy for an explicit risk form', async () => {
+    const waiting = registerAsk({ ...base, risk: true });
+    await vi.advanceTimersByTimeAsync(0);
+    const card = JSON.parse(buildAskCard(sent));
+    expect(card.header).toMatchObject({ template: 'orange', title: { content: '变更确认' } });
+    expect(JSON.stringify(card)).toContain('请核对影响范围和回滚方式');
+    const submit = card.body.elements.find((element: any) => element.tag === 'form').elements
+      .find((element: any) => element.tag === 'button');
+    expect(submit.text.content).toBe('确认变更');
+    expect(submitAskForm({ ...args(), values })).toBe('accepted');
+    await waiting;
+  });
   it('uses one Card 2.0 form in standalone and inline paths with no toggle callbacks', async () => {
     const result = registerAsk(base); await vi.advanceTimersByTimeAsync(0);
     const card = JSON.parse(buildAskCard(sent));

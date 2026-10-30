@@ -33,6 +33,7 @@ export interface AskApiBody {
   /** Optional narrowing only; never grants talk/approval authority. */
   answererOpenId?: string;
   asyncFailure?: 'limit' | 'invalid_questions';
+  risk?: boolean;
 }
 
 export type AskApiBodyError =
@@ -59,7 +60,8 @@ export type AskApiBodyError =
   | 'bad_requestId'
   | 'bad_originKind'
   | 'bad_acknowledge'
-  | 'bad_asyncUserInput';
+  | 'bad_asyncUserInput'
+  | 'bad_risk';
 
 /** Validate the request body. Returns either the parsed body or an error code
  *  ready to be sent back as `{ ok: false, error }` with HTTP 400.
@@ -111,6 +113,7 @@ export function parseAskBody(raw: unknown): AskApiBody | { error: AskApiBodyErro
   }
 
   if (r.acknowledge !== undefined && typeof r.acknowledge !== 'boolean') return { error: 'bad_acknowledge' };
+  if (r.risk !== undefined && typeof r.risk !== 'boolean') return { error: 'bad_risk' };
 
   if (r.asyncFailure !== undefined && (originKind !== CODEX_ASYNC_ASK_ORIGIN
     || (r.asyncFailure !== 'limit' && r.asyncFailure !== 'invalid_questions'))) return { error: 'bad_asyncUserInput' };
@@ -164,6 +167,7 @@ export function parseAskBody(raw: unknown): AskApiBody | { error: AskApiBodyErro
     ...(r.acknowledge !== undefined ? { acknowledge: r.acknowledge as boolean } : {}),
     ...(asyncUserInput ? { asyncUserInput } : {}),
     ...(r.asyncFailure ? { asyncFailure: r.asyncFailure as 'limit' | 'invalid_questions' } : {}),
+    ...(r.risk !== undefined ? { risk: r.risk as boolean } : {}),
   };
   // Reject semantics this receiver did not parse instead of silently creating
   // a different kind of Ask. Identity claims remain on the raw body for the

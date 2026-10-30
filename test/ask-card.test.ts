@@ -138,15 +138,16 @@ describe('buildAskCard', () => {
     expect(blob).toContain('"key":"a"');
   });
 
-  it('单问卡片：渲染 prompt、可答复栏、ask_id、nonce', () => {
+  it('单问决策卡：使用用户文案、正文优先、元信息收在底部', () => {
     const card = JSON.parse(buildAskCard(makePending()));
     const text = JSON.stringify(card);
 
-    expect(card.header.title.content).toBe('botmux ask');
+    expect(card.header.title.content).toBe('需要你确认');
     expect(text).toContain('线上 latency');
-    // 可答复栏 = canTalk 语义，统一显示「本群可对话成员」，不再按 open_id 列名单
-    const metaDiv = card.elements[0];
-    expect(metaDiv.fields[1].text.content).toContain('可对话成员');
+    expect(card.elements[0].text.content).toBe('线上 latency 涨了 30%，下一步怎么处理？');
+    const footer = card.elements.at(-1).text.content;
+    expect(footer).toContain('确认截止');
+    expect(footer).toContain('本群可对话成员');
     expect(text).toContain('"ask_id":"ask-1"');
     expect(text).toContain('"nonce":"nonce-1"');
     // 单问单选：稳定 action button，点击即答；不使用会被飞书 silent-drop 的 form/select_static
@@ -154,6 +155,33 @@ describe('buildAskCard', () => {
     expect(text).not.toContain('select_static');
     expect(text).not.toContain('"tag":"form"');
     expect(text).toContain('继续发布');
+  });
+
+  it('高风险变更卡：橙色标题、风险提示、纵向语义按钮和绿色完成态', () => {
+    const ask = makePending({
+      risk: true,
+      questions: [{
+        prompt: '将 BOE 主实例从 3 扩到 5，并恢复迁移任务。',
+        multiSelect: false,
+        options: [
+          { key: 'deploy', label: '确认扩容并继续（推荐）' },
+          { key: 'rollback', label: '保持现状并回滚' },
+          { key: 'abort', label: '终止任务' },
+        ],
+      }],
+    });
+    const pending = JSON.parse(buildAskCard(ask));
+    expect(pending.header).toMatchObject({ template: 'orange', title: { content: '变更确认' } });
+    expect(JSON.stringify(pending)).toContain('请核对影响范围和回滚方式');
+    const rows = pending.elements.filter((element: any) => element.tag === 'column_set');
+    expect(rows).toHaveLength(3);
+    expect(rows.map((row: any) => row.columns[0].elements[0].type)).toEqual(['primary', 'danger', 'danger']);
+
+    const settled = JSON.parse(buildAskCard(ask, {
+      kind: 'answered', answers: [['deploy']], by: 'ou_owner', comment: null, timedOut: false,
+    }));
+    expect(settled.header).toMatchObject({ template: 'green', title: { content: '变更已确认' } });
+    expect(JSON.stringify(settled)).toContain('确认结果');
   });
 
   it('XPI 指定答复人只用于点击鉴权，不作为 at/person 资源写进卡片', () => {
@@ -189,7 +217,7 @@ describe('buildAskCard', () => {
 
   it('未 settle 卡片：含自定义回复提示（直接在话题里回复）', () => {
     const text = buildAskCard(makePending());
-    expect(text).toContain('直接在话题');
+    expect(text).toContain('直接回复本话题');
   });
 
   it('settled 态（answered + comment）：渲染自定义回复文字与标签', () => {
@@ -239,8 +267,8 @@ describe('buildAskCard', () => {
     const text = JSON.stringify(json);
 
     expect(json.header.template).toBe('green');
-    // 答案摘要包含"已选择"文字
-    expect(text).toContain('已选择');
+    expect(json.header.title.content).toBe('已确认');
+    expect(text).toContain('确认结果');
     // 终态仍保留原问题，让审批人能回看自己批准的内容。
     expect(text).toContain('审批内容：补充回归测试');
     // 选中标签"是"出现在卡片中
@@ -325,7 +353,7 @@ describe('buildAskCard', () => {
       (el: any) => el.tag === 'div' && typeof el.text?.content === 'string' && el.text.content.includes(head),
     );
     expect(questionDiv).toBeDefined();
-    expect(questionDiv.text.content).toBe(`**问题 1**\n${prompt}`);
+    expect(questionDiv.text.content).toBe(prompt);
   });
 
   it('多问卡片：每个长问题正文都完整渲染', () => {
@@ -342,11 +370,11 @@ describe('buildAskCard', () => {
 
     const json = JSON.parse(buildAskCard(ask));
     const questionDivs = json.elements.filter(
-      (el: any) => el.tag === 'div' && typeof el.text?.content === 'string' && el.text.content.startsWith('**问题 '),
+      (el: any) => el.tag === 'div' && typeof el.text?.content === 'string' && el.text.content.startsWith('**第 '),
     );
     expect(questionDivs).toHaveLength(2);
-    expect(questionDivs[0].text.content).toBe(`**问题 1**\n${promptA}`);
-    expect(questionDivs[1].text.content).toBe(`**问题 2**\n${promptB}`);
+    expect(questionDivs[0].text.content).toBe(`**第 1 项**\n${promptA}`);
+    expect(questionDivs[1].text.content).toBe(`**第 2 项**\n${promptB}`);
   });
 
   it('英文 locale：长问题正文完整渲染，无 truncated 标记', () => {
@@ -371,7 +399,7 @@ describe('buildAskCard', () => {
         (el: any) => el.tag === 'div' && typeof el.text?.content === 'string' && el.text.content.includes(head),
       );
       expect(questionDiv).toBeDefined();
-      expect(questionDiv.text.content).toBe(`**Question 1**\n${prompt}`);
+      expect(questionDiv.text.content).toBe(prompt);
     } finally {
       setDefaultLocale(prevLocale);
     }
@@ -381,7 +409,8 @@ describe('buildAskCard', () => {
 describe('ask 卡整卡字节预算（飞书卡片请求体 30KB）', () => {
   const cardBytes = (json: string, chatId = 'oc_chat') => turnReplyCardRequestBytes(json, chatId);
   const questionDivs = (json: string) => (JSON.parse(json).elements as any[]).filter(
-    (el) => el.tag === 'div' && typeof el.text?.content === 'string' && el.text.content.startsWith('**问题 '),
+    (el) => el.tag === 'div' && typeof el.text?.content === 'string'
+      && !el.text.content.includes('确认截止') && !el.text.content.includes('请核对影响范围'),
   );
 
   it.each([
@@ -413,7 +442,7 @@ describe('ask 卡整卡字节预算（飞书卡片请求体 30KB）', () => {
     const ask = makePending({ questions: [{ prompt, multiSelect: false, options: [{ key: 'y', label: '是' }] }] });
     const rendered = renderAskCard(ask);
     expect(rendered.promptTruncated).toBe(false);
-    expect(questionDivs(rendered.json)[0].text.content).toBe(`**问题 1**\n${prompt}`);
+    expect(questionDivs(rendered.json)[0].text.content).toBe(prompt);
   });
 
   it('多问：只截断超长的那一问，短问题保持完整', () => {
@@ -427,7 +456,7 @@ describe('ask 卡整卡字节预算（飞书卡片请求体 30KB）', () => {
     expect(rendered.promptTruncated).toBe(true);
     expect(cardBytes(rendered.json)).toBeLessThanOrEqual(TURN_REPLY_CARD_MAX_BYTES);
     const divs = questionDivs(rendered.json);
-    expect(divs[0].text.content).toBe(`**问题 1**\n${shortPrompt}`);
+    expect(divs[0].text.content).toBe(`**第 1 项**\n${shortPrompt}`);
     expect(divs[1].text.content).toContain('完整内容见本话题中的附件文件');
     const attachment = askPromptAttachmentText(ask);
     expect(attachment).toContain(shortPrompt);
@@ -492,7 +521,7 @@ describe('handleAskCardAction', () => {
     });
     expect(accepted).toBeDefined();
     expect(accepted?.toast).toBeUndefined();
-    expect((accepted as Record<string, any>)?.header?.title?.content).toContain('已结束');
+    expect((accepted as Record<string, any>)?.header?.title?.content).toBe('已确认');
     await expect(promise).resolves.toMatchObject({ kind: 'answered', answers: [['deploy']], by: 'ou_owner' });
   });
 
@@ -820,7 +849,7 @@ describe('handleAskCardAction: ask_submit 路径', () => {
     expect(result).toBeDefined();
     expect(result?.toast).toBeUndefined();
     const card = result as Record<string, any>;
-    expect(card.header?.title?.content).toContain('已结束');
+    expect(card.header?.title?.content).toBe('已确认');
     expect(card.header?.template).toBe('green');
     // 终态卡片包含选中的答案摘要
     expect(JSON.stringify(card)).toContain('是');
@@ -872,7 +901,7 @@ describe('handleAskCardAction: ask_submit 路径', () => {
     expect(result).toBeDefined();
     expect(result?.toast).toBeUndefined();
     const card = result as Record<string, any>;
-    expect(card.header?.title?.content).toContain('已结束');
+    expect(card.header?.title?.content).toBe('已确认');
     expect(JSON.stringify(card)).toContain('A');
   });
 });
@@ -919,7 +948,7 @@ describe('handleAskCardAction: 空多选提交二次确认', () => {
     expect(cardBlob).toContain('确认空提交');
     expect(cardBlob).toContain('confirm_empty');
     expect(cardBlob).toContain('你还没有勾选任何选项');
-    expect(cardBlob).not.toContain('已结束');
+    expect(cardBlob).not.toContain('已确认');
     // 未 settle，可继续
     expect(_getPending(ask.askId)?.settled).toBe(false);
   });
@@ -944,7 +973,7 @@ describe('handleAskCardAction: 空多选提交二次确认', () => {
     expect(mockedSubmitAsk).toHaveBeenLastCalledWith({ askId: ask.askId, nonce: ask.nonce, by: 'ou_owner', confirmEmpty: true });
     const card = result as Record<string, any>;
     // 终态卡片（settle 用 settledCardResponse，直接是 raw 卡片体，不含 card 包裹）
-    expect(card.header?.title?.content).toContain('已结束');
+    expect(card.header?.title?.content).toBe('已确认');
     expect(_getPending(ask.askId)?.settled).toBe(true);
   });
 
@@ -1017,7 +1046,7 @@ describe('handleAskCardAction: 空多选提交二次确认', () => {
     });
 
     const card = result as Record<string, any>;
-    expect(card.header?.title?.content).toContain('已结束');
+    expect(card.header?.title?.content).toBe('已确认');
     expect(JSON.stringify(card)).not.toContain('确认空提交');
     expect(_getPending(ask.askId)?.settled).toBe(true);
   });
@@ -1169,13 +1198,14 @@ describe('createLarkAskCardDispatcher', () => {
 
 describe('ask option layout（askOptionLayout per-bot 配置）', () => {
   afterEach(() => {
-    // 还原为「无配置」lookup，避免污染同文件其它用例（未配置即 compact）。
+    // 还原为「无配置」lookup，避免污染同文件其它用例（未配置即 auto）。
     setAskOptionLayoutLookup(() => undefined);
   });
 
   it('normalizeAskOptionLayout：合法值原样通过，非法值给 warning 并丢弃', () => {
     expect(normalizeAskOptionLayout(undefined)).toEqual({ warnings: [] });
     expect(normalizeAskOptionLayout(null)).toEqual({ warnings: [] });
+    expect(normalizeAskOptionLayout('auto')).toEqual({ layout: 'auto', warnings: [] });
     expect(normalizeAskOptionLayout('compact')).toEqual({ layout: 'compact', warnings: [] });
     expect(normalizeAskOptionLayout('vertical')).toEqual({ layout: 'vertical', warnings: [] });
     for (const bad of ['sideways', 42, true, [], {}]) {
@@ -1185,20 +1215,20 @@ describe('ask option layout（askOptionLayout per-bot 配置）', () => {
     }
   });
 
-  it('askOptionLayoutForBot：lookup 未注册 / bot 未知 / 值非法 / 抛错一律回退 compact', () => {
-    expect(askOptionLayoutForBot('cli_ask')).toBe('compact');
+  it('askOptionLayoutForBot：lookup 未注册 / bot 未知 / 值非法 / 抛错一律回退 auto', () => {
+    expect(askOptionLayoutForBot('cli_ask')).toBe('auto');
     setAskOptionLayoutLookup(() => undefined);
-    expect(askOptionLayoutForBot('cli_ask')).toBe('compact');
+    expect(askOptionLayoutForBot('cli_ask')).toBe('auto');
     setAskOptionLayoutLookup(() => ({ config: { askOptionLayout: 'sideways' } }));
-    expect(askOptionLayoutForBot('cli_ask')).toBe('compact');
+    expect(askOptionLayoutForBot('cli_ask')).toBe('auto');
     setAskOptionLayoutLookup(() => { throw new Error('boom'); });
-    expect(askOptionLayoutForBot('cli_ask')).toBe('compact');
+    expect(askOptionLayoutForBot('cli_ask')).toBe('auto');
     setAskOptionLayoutLookup(() => ({ config: { askOptionLayout: 'vertical' } }));
     expect(askOptionLayoutForBot('cli_ask')).toBe('vertical');
-    expect(askOptionLayoutForBot(undefined)).toBe('compact');
+    expect(askOptionLayoutForBot(undefined)).toBe('auto');
   });
 
-  it('默认 compact：action 行每行最多 4 个按钮，无 column_set', () => {
+  it('默认 auto：超过 3 个选项时自动纵排', () => {
     const ask = makePending({
       questions: [{
         prompt: 'q', multiSelect: false,
@@ -1206,12 +1236,19 @@ describe('ask option layout（askOptionLayout per-bot 配置）', () => {
       }],
     });
     const card = JSON.parse(buildAskCard(ask));
+    const optionRows = card.elements.filter((el: any) => el.tag === 'column_set');
+    expect(optionRows).toHaveLength(6);
+  });
+
+  it('显式 compact：action 行每行最多 4 个按钮', () => {
+    setAskOptionLayoutLookup(() => ({ config: { askOptionLayout: 'compact' } }));
+    const ask = makePending({ questions: [{ prompt: 'q', multiSelect: false,
+      options: Array.from({ length: 6 }, (_, i) => ({ key: `k${i}`, label: `L${i}` })) }] });
+    const card = JSON.parse(buildAskCard(ask));
     expect(card.elements.some((el: any) => el.tag === 'column_set')).toBe(false);
-    const optionRows = card.elements.filter((el: any) =>
-      el.tag === 'action' && el.actions.some((a: any) => a.value?.action === ASK_SELECT_ACTION));
-    expect(optionRows).toHaveLength(2);
-    expect(optionRows[0].actions).toHaveLength(4);
-    expect(optionRows[1].actions).toHaveLength(2);
+    const rows = card.elements.filter((el: any) => el.tag === 'action'
+      && el.actions.some((a: any) => a.value?.action === ASK_SELECT_ACTION));
+    expect(rows.map((row: any) => row.actions.length)).toEqual([4, 2]);
   });
 
   it('vertical：每个选项一个 column_set 行，单列 weighted、一按钮', () => {

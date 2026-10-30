@@ -4055,7 +4055,7 @@ describe('PUT /api/bot-ask-option-layout — per-bot ask option layout', () => {
       handle = await startIpcServer({ port: 0, host: '127.0.0.1' });
       const base = `http://127.0.0.1:${handle.port}`;
 
-      // 未配置时 GET 投影为 null（内建 compact 缺省）
+      // 未配置时 GET 投影为 null（内建 auto 缺省）
       expect(await (await fetch(`${base}/api/bot-default-oncall`)).json())
         .toMatchObject({ askOptionLayout: null });
 
@@ -4105,18 +4105,27 @@ describe('PUT /api/bot-ask-option-layout — per-bot ask option layout', () => {
       expect(oversized.status).toBe(413);
       expect(await oversized.json()).toMatchObject({ ok: false, error: 'body_too_large' });
 
-      // compact 即缺省：稀疏存储删除该键
+      // compact 是显式覆盖，必须原样持久化
       const compact = await fetch(`${base}/api/bot-ask-option-layout`, {
         method: 'PUT',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ askOptionLayout: 'compact' }),
       });
       expect(compact.status).toBe(200);
-      expect(await compact.json()).toMatchObject({ ok: true, askOptionLayout: null });
-      expect(JSON.parse(readFileSync(configPath, 'utf-8'))[0].askOptionLayout).toBeUndefined();
-      expect((getBot(appId).config as any).askOptionLayout).toBeUndefined();
+      expect(await compact.json()).toMatchObject({ ok: true, askOptionLayout: 'compact' });
+      expect(JSON.parse(readFileSync(configPath, 'utf-8'))[0].askOptionLayout).toBe('compact');
+      expect((getBot(appId).config as any).askOptionLayout).toBe('compact');
       expect(await (await fetch(`${base}/api/bot-default-oncall`)).json())
-        .toMatchObject({ askOptionLayout: null });
+        .toMatchObject({ askOptionLayout: 'compact' });
+
+      // auto 即缺省：稀疏存储删除该键
+      const auto = await fetch(`${base}/api/bot-ask-option-layout`, {
+        method: 'PUT', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ askOptionLayout: 'auto' }),
+      });
+      expect(auto.status).toBe(200);
+      expect(await auto.json()).toMatchObject({ ok: true, askOptionLayout: null });
+      expect(JSON.parse(readFileSync(configPath, 'utf-8'))[0].askOptionLayout).toBeUndefined();
 
       // 先写回 vertical 再 null 清除
       await fetch(`${base}/api/bot-ask-option-layout`, {

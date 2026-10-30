@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>BotMux 确认卡片样式</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 36px; background: #f5f6f7; color: #1f2329; font: 14px/1.55 -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif; }
+    h1 { margin: 0; font-size: 24px; font-weight: 650; }
+    .subtitle { margin: 4px 0 24px; color: #646a73; }
+    .grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 20px; align-items: start; }
+    .label { margin: 0 0 8px; color: #646a73; font-size: 13px; }
+    .card { overflow: hidden; border: 1px solid #dfe3e8; border-radius: 10px; background: #fff; box-shadow: 0 2px 8px rgb(31 35 41 / 5%); }
+    .header { padding: 13px 18px; font-size: 16px; font-weight: 650; }
+    .blue { background: #e8f0ff; color: #245bdb; }
+    .orange { background: #fff1df; color: #ad5f00; }
+    .green { background: #e4f7ed; color: #18794e; }
+    .body { padding: 18px; }
+    .question { margin: 0 0 14px; font-size: 15px; font-weight: 560; }
+    .detail { margin: -4px 0 14px; color: #41464f; }
+    .risk { margin: 0 0 14px; padding: 10px 12px; border-radius: 6px; background: #fff7e8; color: #744210; }
+    .risk strong { display: block; color: #5f3708; }
+    .buttons { display: flex; gap: 8px; flex-wrap: wrap; }
+    .buttons.vertical { flex-direction: column; }
+    button { min-height: 34px; padding: 7px 13px; border: 1px solid #c9cdd4; border-radius: 6px; background: #fff; color: #1f2329; font: inherit; text-align: center; }
+    .vertical button { width: 100%; }
+    .primary { border-color: #3370ff; background: #3370ff; color: #fff; }
+    .danger { border-color: #f54a45; color: #d83931; }
+    .footer { margin-top: 16px; padding-top: 12px; border-top: 1px solid #e5e6eb; color: #646a73; font-size: 12px; }
+    .result { margin: 0; font-size: 15px; }
+    .result strong { display: block; margin-bottom: 4px; }
+    @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <h1>确认卡片样式</h1>
+  <p class="subtitle">默认决策卡、高风险变更卡与完成态。确认权限和回调语义保持不变。</p>
+  <main class="grid">
+    <section>
+      <p class="label">普通确认</p>
+      <article class="card">
+        <header class="header blue">需要你确认</header>
+        <div class="body">
+          <p class="question">接下来怎么处理迁移任务？</p>
+          <div class="buttons">
+            <button class="primary">继续观察（推荐）</button>
+            <button>暂停任务</button>
+          </div>
+          <div class="footer">选项不合适？直接回复本话题。<br>确认截止：15:30 · 本群可对话成员可操作</div>
+        </div>
+      </article>
+    </section>
+    <section>
+      <p class="label">高风险确认</p>
+      <article class="card">
+        <header class="header orange">变更确认</header>
+        <div class="body">
+          <div class="risk"><strong>⚠ 请核对影响范围和回滚方式</strong>确认后机器人会继续执行这项变更。</div>
+          <p class="question">扩容 BOE 实例并恢复迁移任务</p>
+          <p class="detail">当前：3 个主实例 + 1 个 canary<br>目标：5 个主实例 + 1 个 canary</p>
+          <div class="buttons vertical">
+            <button class="primary">确认扩容并继续（推荐）</button>
+            <button class="danger">保持现状并回滚</button>
+            <button class="danger">终止任务</button>
+          </div>
+          <div class="footer">选项不合适？直接回复本话题。<br>确认截止：15:30 · 仅指定成员可操作</div>
+        </div>
+      </article>
+    </section>
+    <section>
+      <p class="label">完成态</p>
+      <article class="card">
+        <header class="header green">变更已确认</header>
+        <div class="body">
+          <p class="question">扩容 BOE 实例并恢复迁移任务</p>
+          <p class="result"><strong>确认结果</strong>确认扩容并继续（推荐）<br>答复人：曾尚星</p>
+        </div>
+      </article>
+    </section>
+  </main>
+</body>
+</html>

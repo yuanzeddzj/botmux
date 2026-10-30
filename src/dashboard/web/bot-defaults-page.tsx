@@ -8573,12 +8573,12 @@ function RiffSection(props: { bot: BotDefaultsRow; patchBot: PatchBot; persistCl
 
 function AskOptionLayoutSection(props: { bot: BotDefaultsRow; patchBot: PatchBot }) {
   const tr = useT();
-  const [value, setValue] = useState<AskOptionLayout>(props.bot.askOptionLayout ?? 'compact');
+  const [value, setValue] = useState<AskOptionLayout>(props.bot.askOptionLayout ?? 'auto');
   const [status, setStatus] = useState<StatusMessage>(null);
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    setValue(props.bot.askOptionLayout ?? 'compact');
+    setValue(props.bot.askOptionLayout ?? 'auto');
     setStatus(null);
   }, [props.bot.askOptionLayout]);
 
@@ -8589,18 +8589,18 @@ function AskOptionLayoutSection(props: { bot: BotDefaultsRow; patchBot: PatchBot
 
   async function save(): Promise<void> {
     await saveBotField({
-      // 稀疏存储：compact 即缺省，写 null 让 daemon 从 bots.json 删除该键。
+      // 稀疏存储：auto 即缺省，写 null 让 daemon 从 bots.json 删除该键。
       request: () => sendJson(
         'PUT',
         `/api/bots/${encodeURIComponent(props.bot.larkAppId)}/ask-option-layout`,
-        { askOptionLayout: value === 'vertical' ? 'vertical' : null },
+        { askOptionLayout: value === 'auto' ? null : value },
       ),
       setStatus,
       setBusy,
       saved: tr('botDefaults.askOptionLayoutSaved'),
       onSaved: body => {
         const next = (body.askOptionLayout ?? null) as AskOptionLayout | null;
-        setValue(next ?? 'compact');
+        setValue(next ?? 'auto');
         props.patchBot(props.bot.larkAppId, { askOptionLayout: next });
       },
     });
