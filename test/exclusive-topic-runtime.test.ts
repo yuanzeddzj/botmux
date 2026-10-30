@@ -55,3 +55,17 @@ it('rechecks an old active ownership record once after the peer-discovery protoc
   expect(await runtime.admit(input('b', 3, false), async () => {})).toBe(true);
   expect(revoke.mock.calls).toHaveLength(calls);
 });
+
+it('restores an unverified legacy selection from trusted history before treating it as the owner', async () => {
+  const coordinator = new ExclusiveTopicCoordinator({ dataDir, revokeOtherBots: async () => {} });
+  await coordinator.admit(input('a', 1), async () => {});
+  const path = join(dataDir, 'topic-owners', readdirSync(join(dataDir, 'topic-owners')).find(name => name.endsWith('.selection.json'))!);
+  const legacy = JSON.parse(readFileSync(path, 'utf8'));
+  delete legacy.protocol;
+  writeFileSync(path, JSON.stringify(legacy));
+  expect(coordinator.currentOwner(topic.chatId, topic.rootId)).toBeUndefined();
+  expect(await coordinator.admit(input('a', 2, false), async () => { throw new Error('unverified owner'); })).toBe(false);
+  const runtime = createExclusiveTopicRuntime({ inferOwner: async () => ({ ownerAppId: 'b', selectedAt: 2, selectionMessageId: 'om_verified_b' }) });
+  expect(await runtime.admit(input('b', 3, false), async () => { running.add('b'); expect([...running]).toEqual(['b']); })).toBe(true);
+  expect(runtime.currentOwner(topic.chatId, topic.rootId)).toBe('b');
+});

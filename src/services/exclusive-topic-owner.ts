@@ -16,6 +16,7 @@ export interface TopicSelection extends TopicIdentity {
   epoch: number;
   selectedAt: number;
   selectionMessageId: string;
+  protocol?: 'v2';
 }
 
 export interface TopicExecutionOwner extends TopicIdentity {
@@ -111,8 +112,8 @@ export class ExclusiveTopicCoordinator implements ExclusiveTopics {
 
   currentOwner(chatId: string, rootId: string): string | undefined {
     const identity = { chatId, rootId };
-    return readTopicSelection(this.options.dataDir, identity)?.ownerAppId
-      ?? readTopicExecutionOwner(this.options.dataDir, identity)?.ownerAppId;
+    const selection = readTopicSelection(this.options.dataDir, identity);
+    return selection?.protocol === 'v2' ? selection.ownerAppId : undefined;
   }
 
   private async publishSelection(input: ExclusiveTopicInput): Promise<void> {
@@ -133,6 +134,7 @@ export class ExclusiveTopicCoordinator implements ExclusiveTopics {
           : 1,
         selectedAt: input.createdAt,
         selectionMessageId: input.messageId,
+        protocol: 'v2',
       };
       writeRecord(path, next);
     });
@@ -156,19 +158,24 @@ export class ExclusiveTopicCoordinator implements ExclusiveTopics {
       if (!published.ok) throw published.error;
       return withFileLock(executionPath, async () => {
         let selection = readTopicSelection(this.options.dataDir, input);
-        if (!selection && this.options.inferOwner) {
+        if ((!selection || selection.protocol !== 'v2') && this.options.inferOwner) {
+          const previous = selection;
           const inferred = await this.options.inferOwner(input);
           if (inferred) {
             const selectionPath = topicFile(this.options.dataDir, input, 'selection');
             await withFileLock(selectionPath, async () => {
               // A newer explicit selector can publish while history is read.
-              if (readTopicSelection(this.options.dataDir, input)) return;
-              writeRecord(selectionPath, { ...inferred, chatId: input.chatId, rootId: input.rootId, epoch: 1 });
+              const latest = readTopicSelection(this.options.dataDir, input);
+              if (latest?.protocol === 'v2') return;
+              if (latest?.selectionMessageId !== previous?.selectionMessageId) return;
+              writeRecord(selectionPath, { ...inferred, chatId: input.chatId, rootId: input.rootId,
+                epoch: latest ? latest.epoch + (latest.ownerAppId === inferred.ownerAppId ? 0 : 1) : 1,
+                protocol: 'v2' });
             });
             selection = readTopicSelection(this.options.dataDir, input);
           }
         }
-        if (!selection || selection.ownerAppId !== input.larkAppId) return false;
+        if (!selection || selection.protocol !== 'v2' || selection.ownerAppId !== input.larkAppId) return false;
         const captured = selection;
         const isCurrent = () => {
           const current = readTopicSelection(this.options.dataDir, input);
@@ -203,6 +210,7 @@ export function topicExecutionAllowed(dataDir: string, input: TopicIdentity & { 
   const selection = readTopicSelection(dataDir, input);
   const owner = readTopicExecutionOwner(dataDir, input);
   return selection?.ownerAppId === input.larkAppId
+    && selection.protocol === 'v2'
     && owner?.ownerAppId === input.larkAppId
     && owner.epoch === selection.epoch
     && (input.epoch === undefined || owner.epoch === input.epoch)
