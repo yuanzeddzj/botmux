@@ -6,6 +6,8 @@
 
 每项分别配置思考强度和 Standard / Max 上下文。容量和兼容档位来自当前 TraeX 模型目录；截图是使用真实组件和隔离接口的演示。详细运行规则见[设计说明](design/2026-10-21-traex-auto-model.md)。
 
+可选的「跨话题排队保护」按 Bot + 具体模型持久化容量状态。模型确认持续排队后进入 OPEN，新话题在保护期内跳过它；保护期结束进入 HALF_OPEN，只发放一个恢复探针。探针成功关闭熔断，仍排队则按指数退避重新 OPEN，退避不超过配置的最长保护时长。默认首次保护 10 分钟、最长 30 分钟。不同 Bot 的状态隔离；同一话题原本选中的模型和恢复合同保持不变。纯 daemon 恢复且没有待执行输入的 worker 不占用探针。
+
 ## 构建与检查
 
 使用仓库规定的 Bun 版本和匹配的依赖。共享 `node_modules` 的 worktree 不执行安装。
@@ -15,6 +17,7 @@ bun run build
 bun run test -- test/traex-auto-model.test.ts \
   test/traex-auto-model-settings.test.ts \
   test/traex-auto-model-preferences.test.ts \
+  test/traex-auto-model-circuit.test.ts \
   test/traex-auto-model-worker.test.ts \
   test/traex-model-load.test.ts \
   test/traex-startup-readiness.test.ts \
@@ -44,6 +47,7 @@ BOTMUX_TEST_WORKER_BINARY=/tmp/botmux-auto-model \
 5. 启用 Auto 自动适配当前托管 TraeX 的终端输入，不改 Bot 已保存的 RPC 偏好；关闭后恢复该偏好。其他 Bot、具体模型调用、wrapper、adopt 和共享 App Server 不套用 Auto。
 6. 新版独立 tmux socket 下，冷创建与模型切换都在正确的 managed server 上；升级重新观察仍存活的旧默认 server 会话时保持其原有 pane。
 7. 新话题从首选切到备选或最终等待模型后执行 `/restart`，应续接同一原生会话并保持模型、档位和最终等待状态；未变化的 Skill 目录不重复交付。再次输入仍在该模型执行，除非显式开启每轮重新择优。
+8. 开启跨话题排队保护后，让首选模型确认排队：另开话题应直接使用健康备选，不再先等待首选阈值。首次保护期结束后并发新建两个话题，只允许一个使用首选探针；探针成功后后续新话题恢复首选，探针再次排队则保护时长递增但不超过上限。重启 daemon 后以上状态仍保留。
 
 新启动或重启会话加载配置。部署本地测试构建前备份配置和会话数据库，重启后分别核对磁盘版本、运行进程、原生会话 ID、tmux pane PID 以及 Dashboard HTTP。手动 `botmux upgrade` 会替换本地测试包，正式版本是否包含此功能应以合入状态为准。
 

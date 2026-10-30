@@ -2121,6 +2121,8 @@ export type DaemonToWorker = DaemonToWorkerBase extends infer Message
         cliInstanceBinding?: import('./services/codex-instance-pool.js').SessionCliInstanceBindingV1;
         terminalCardEpoch?: string;
         traexAutoModelRuntime?: import('./services/traex-auto-model.js').TraexAutoModelRuntimeState;
+        traexAutoModelCircuitLease?: import('./services/traex-auto-model-circuit.js').TraexAutoModelCircuitLease;
+        traexAutoModelCircuitModel?: string;
         /** Experimental, off by default: only an explicit true lets the worker
          *  suppress a failure notice after an exact acknowledged final. */
         suppressDeliveredFinalFailureNotice?: boolean;
@@ -2292,6 +2294,13 @@ export type WorkerToDaemon =
       reasoningEffort: string | null;
       modelBackendVariant?: 'standard' | 'max' | null;
       traexAutoModelRuntime?: import('./services/traex-auto-model.js').TraexAutoModelRuntimeState;
+    }
+  | {
+      type: 'traex_auto_model_circuit';
+      outcome: 'capacity_queue' | 'success';
+      model: string;
+      turnId: string;
+      leaseToken?: string;
     }
   /** OBSERVED FACTS about Claude Code's automatic model switching — never a
    * decision. `claudeSessionId` (always present) says WHICH Claude conversation

@@ -68,7 +68,10 @@ describe('TraeX auto-model settings', () => {
       });
       // Old clients omitting the field preserve it; an invalid pool is atomic.
       expect((await save({ cliId: 'traex', model: 'auto' })).status).toBe(200);
-      const configuredPool = { ...pool, previousSettings: {
+      const configuredPool = { ...pool, circuitBreaker: {
+        enabled: true, failureThreshold: 1, openMs: 600_000, maxOpenMs: 1_800_000,
+        halfOpenMaxProbes: 1, successThreshold: 1,
+      }, previousSettings: {
         model: 'normal-model', reasoningEffort: 'xhigh', modelBackendVariant: 'max',
       }, modelSettings: {
         'gpt-5.6-sol': { reasoningEffort: 'xhigh', modelBackendVariant: 'max' },
@@ -155,10 +158,15 @@ describe('TraeX auto-model settings', () => {
       act(() => root.findByProps({ dataInput: 'autoModelEffort0' }).props.onChange('high'));
       act(() => root.findByProps({ dataInput: 'autoModelContext0' }).props.onChange('max'));
       act(() => root.findByProps({ 'data-input': 'autoModelTimeout' }).props.onChange({ currentTarget: { value: '15' } }));
+      act(() => root.findByProps({ 'data-input': 'autoModelCircuitBreaker' }).props.onChange({ currentTarget: { checked: true } }));
+      act(() => root.findByProps({ 'data-input': 'autoModelCircuitOpen' }).props.onChange({ currentTarget: { value: '600' } }));
+      act(() => root.findByProps({ 'data-input': 'autoModelCircuitMaxOpen' }).props.onChange({ currentTarget: { value: '1800' } }));
       await act(async () => { await root.findByProps({ 'data-action': 'save-agent' }).props.onClick(); });
       expect(saved).toMatchObject({ model: 'auto', traexAutoModel: { enabled: true, models: ['m2', 'm1'],
         modelSettings: { m2: { reasoningEffort: 'high', modelBackendVariant: 'max' }, m1: {} },
-        reselectPerTurn: false, queueTimeoutMs: 15_000, switchCooldownMs: 60_000 } });
+        reselectPerTurn: false, queueTimeoutMs: 15_000, switchCooldownMs: 60_000,
+        circuitBreaker: { enabled: true, failureThreshold: 1, openMs: 600_000, maxOpenMs: 1_800_000,
+          halfOpenMaxProbes: 1, successThreshold: 1 } } });
       expect(patchBot).toHaveBeenLastCalledWith('auto_ui', expect.objectContaining({ traexAutoModel: saved.traexAutoModel }));
     } finally {
       if (rendered) act(() => rendered!.unmount());

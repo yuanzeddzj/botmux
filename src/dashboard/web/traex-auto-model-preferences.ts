@@ -25,6 +25,9 @@ export interface TraexAutoModelPreferences {
   modelSettings: Record<string, TraexAutoModelSettings>;
   timeoutSeconds: string;
   cooldownSeconds: string;
+  circuitBreakerEnabled: boolean;
+  circuitOpenSeconds: string;
+  circuitMaxOpenSeconds: string;
 }
 
 export interface TraexAutoModelDraft extends TraexAutoModelPreferences {
@@ -45,6 +48,9 @@ export function autoModelDraftFromConfig(
     ])),
     timeoutSeconds: String((config?.queueTimeoutMs ?? 30_000) / 1_000),
     cooldownSeconds: String((config?.switchCooldownMs ?? 60_000) / 1_000),
+    circuitBreakerEnabled: config?.circuitBreaker?.enabled === true,
+    circuitOpenSeconds: String((config?.circuitBreaker?.openMs ?? 600_000) / 1_000),
+    circuitMaxOpenSeconds: String((config?.circuitBreaker?.maxOpenMs ?? 1_800_000) / 1_000),
     ...preferences,
     // Reload always reflects the saved switch, even for legacy drafts that
     // carried enabled. Only the pool preferences survive an unfinished edit.
@@ -81,12 +87,18 @@ export function readAutoModelDraft(botId: string, storage = autoModelDraftStorag
       }
     }
     if (value.draft.reselectPerTurn !== undefined && typeof value.draft.reselectPerTurn !== 'boolean') return undefined;
+    if (value.draft.circuitBreakerEnabled !== undefined && typeof value.draft.circuitBreakerEnabled !== 'boolean') return undefined;
+    if (value.draft.circuitOpenSeconds !== undefined && typeof value.draft.circuitOpenSeconds !== 'string') return undefined;
+    if (value.draft.circuitMaxOpenSeconds !== undefined && typeof value.draft.circuitMaxOpenSeconds !== 'string') return undefined;
     return {
       reselectPerTurn: value.draft.reselectPerTurn === true,
       models: value.draft.models,
       modelSettings: value.draft.modelSettings,
       timeoutSeconds: value.draft.timeoutSeconds,
       cooldownSeconds: value.draft.cooldownSeconds,
+      circuitBreakerEnabled: value.draft.circuitBreakerEnabled === true,
+      circuitOpenSeconds: value.draft.circuitOpenSeconds ?? '600',
+      circuitMaxOpenSeconds: value.draft.circuitMaxOpenSeconds ?? '1800',
     };
   } catch { return undefined; }
 }
@@ -96,9 +108,11 @@ export function readAutoModelDraft(botId: string, storage = autoModelDraftStorag
 export function writeAutoModelDraft(botId: string, draft: TraexAutoModelPreferences, storage = autoModelDraftStorage()): boolean {
   try {
     if (!storage) return false;
-    const { reselectPerTurn, models, modelSettings, timeoutSeconds, cooldownSeconds } = draft;
+    const { reselectPerTurn, models, modelSettings, timeoutSeconds, cooldownSeconds,
+      circuitBreakerEnabled, circuitOpenSeconds, circuitMaxOpenSeconds } = draft;
     storage.setItem(keyFor(botId), JSON.stringify({
-      version: 1, draft: { reselectPerTurn, models, modelSettings, timeoutSeconds, cooldownSeconds },
+      version: 1, draft: { reselectPerTurn, models, modelSettings, timeoutSeconds, cooldownSeconds,
+        circuitBreakerEnabled, circuitOpenSeconds, circuitMaxOpenSeconds },
     }));
     return true;
   } catch { return false; }

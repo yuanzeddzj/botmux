@@ -31,7 +31,8 @@ describe('Auto model defaults and reload persistence', () => {
     };
     const draft = { enabled: true, reselectPerTurn: true, models: ['GPT-5.6-Sol', ''], modelSettings: {
       'GPT-5.6-Sol': { reasoningEffort: 'xhigh' as const, modelBackendVariant: 'standard' as const },
-    }, timeoutSeconds: '30', cooldownSeconds: '60' };
+    }, timeoutSeconds: '30', cooldownSeconds: '60', circuitBreakerEnabled: true,
+    circuitOpenSeconds: '600', circuitMaxOpenSeconds: '1800' };
     const { enabled: _enabled, ...preferences } = draft;
     expect(writeAutoModelDraft('bot1', draft, storage)).toBe(true);
     expect(JSON.parse([...entries.values()][0]).draft).not.toHaveProperty('enabled');

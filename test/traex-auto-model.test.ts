@@ -28,6 +28,42 @@ describe('normalizeTraexAutoModelConfig', () => {
     expect(normalizeTraexAutoModelConfig({ enabled: false, models: ['m1'] })).toEqual({});
   });
 
+  it('normalizes durable circuit defaults and keeps them in the policy identity', () => {
+    const parsed = normalizeTraexAutoModelConfig({
+      enabled: true,
+      models: ['preferred', 'fallback'],
+      circuitBreaker: { enabled: true },
+    });
+    expect(parsed.config?.circuitBreaker).toEqual({
+      enabled: true,
+      failureThreshold: 1,
+      openMs: 600_000,
+      maxOpenMs: 1_800_000,
+      halfOpenMaxProbes: 1,
+      successThreshold: 1,
+    });
+    expect(traexAutoModelPolicyKey(parsed.config!)).not.toBe(traexAutoModelPolicyKey({
+      enabled: true,
+      models: ['preferred', 'fallback'],
+      queueTimeoutMs: 30_000,
+    }));
+  });
+
+  it.each([
+    { enabled: false },
+    { enabled: true, failureThreshold: 0 },
+    { enabled: true, openMs: 4_999 },
+    { enabled: true, openMs: 20_000, maxOpenMs: 19_999 },
+    { enabled: true, halfOpenMaxProbes: 0 },
+    { enabled: true, successThreshold: 11 },
+  ])('rejects an invalid durable circuit policy (%j)', circuitBreaker => {
+    expect(normalizeTraexAutoModelConfig({
+      enabled: true,
+      models: ['m1'],
+      circuitBreaker,
+    }).error).toContain('circuitBreaker');
+  });
+
   it('rejects duplicate, virtual-auto, empty and out-of-range pools', () => {
     expect(normalizeTraexAutoModelConfig({
       enabled: true,

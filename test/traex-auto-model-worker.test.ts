@@ -38,6 +38,36 @@ function harness(extra: Record<string, unknown> = {}) {
 }
 const action = { kind: 'switch', reason: 'lowest_load', turnId: 'turn', fromModel: 'core', toModel: 'backup', toIndex: 1, loadPercent: 120 };
 
+describe('Auto-model circuit Worker observations', () => {
+  it('reports confirmed capacity once and carries the exact recovery lease', () => {
+    const send = vi.fn();
+    const scope = {
+      lastInitConfig: {
+        traexAutoModel: { enabled: true, models: ['core', 'backup'], queueTimeoutMs: 5_000,
+          circuitBreaker: { enabled: true, failureThreshold: 1, openMs: 600_000,
+            maxOpenMs: 1_800_000, halfOpenMaxProbes: 1, successThreshold: 1 } },
+        traexAutoModelCircuitLease: { model: 'core', token: 'probe-token', acquiredAtMs: 1 },
+      },
+      traexAutoModelCircuitFailures: new Set<string>(),
+      traexAutoModelCircuitKey: (turnId: string, model: string) => `${turnId}\0${model.toLowerCase()}`,
+      send,
+    };
+    const report = loadWorkerFunction<(outcome: 'capacity_queue' | 'success', turnId: string, model: string) => void>(
+      'reportTraexAutoModelCircuit', scope,
+    );
+    report('capacity_queue', 'turn', 'core');
+    report('capacity_queue', 'turn', 'core');
+    report('success', 'turn', 'core');
+    report('success', 'healthy-turn', 'core');
+    expect(send.mock.calls).toEqual([
+      [{ type: 'traex_auto_model_circuit', outcome: 'capacity_queue', model: 'core', turnId: 'turn',
+        leaseToken: 'probe-token' }],
+      [{ type: 'traex_auto_model_circuit', outcome: 'success', model: 'core', turnId: 'healthy-turn',
+        leaseToken: 'probe-token' }],
+    ]);
+  });
+});
+
 function admissionHarness(extra: Record<string, unknown> = {}) {
   const item = { content: 'follow-up', turnId: 'next', trustedCaller: { requestUserOpenId: 'original-caller' } };
   const scope: Record<string, any> = {

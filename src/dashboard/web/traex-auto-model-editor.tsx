@@ -12,6 +12,9 @@ export function TraexAutoModelEditor(props: {
   modelSettings: Record<string, TraexAutoModelSettings>;
   timeoutSeconds: string;
   cooldownSeconds: string;
+  circuitBreakerEnabled: boolean;
+  circuitOpenSeconds: string;
+  circuitMaxOpenSeconds: string;
   candidates: string[];
   capabilities?: ModelCapabilities[];
   busy: boolean;
@@ -25,6 +28,9 @@ export function TraexAutoModelEditor(props: {
   onSettings: (model: string, settings: TraexAutoModelSettings) => void;
   onTimeout: (seconds: string) => void;
   onCooldown: (seconds: string) => void;
+  onCircuitBreakerEnabled: (enabled: boolean) => void;
+  onCircuitOpen: (seconds: string) => void;
+  onCircuitMaxOpen: (seconds: string) => void;
 }) {
   const tr = useT();
   function move(index: number, delta: number) {
@@ -136,6 +142,28 @@ export function TraexAutoModelEditor(props: {
             value={props.cooldownSeconds} disabled={props.busy}
             onChange={event => props.onCooldown(event.currentTarget.value)} />
         </label>
+        <label className="bd-auto-model-toggle">
+          <input type="checkbox" data-input="autoModelCircuitBreaker" checked={props.circuitBreakerEnabled}
+            disabled={props.busy} onChange={event => props.onCircuitBreakerEnabled(event.currentTarget.checked)} />
+          <span>{tr('botDefaults.autoModelCircuitBreaker')}</span>
+          <InfoTip label={tr('botDefaults.autoModelDetails')} className="bd-info-tip" trigger="?">
+            {tr('botDefaults.autoModelCircuitBreakerHelp')}
+          </InfoTip>
+        </label>
+        {props.circuitBreakerEnabled ? <>
+          <label className="bd-auto-model-timeout">
+            <span>{tr('botDefaults.autoModelCircuitOpen')}</span>
+            <input type="number" min="5" max="3600" step="1" data-input="autoModelCircuitOpen"
+              value={props.circuitOpenSeconds} disabled={props.busy}
+              onChange={event => props.onCircuitOpen(event.currentTarget.value)} />
+          </label>
+          <label className="bd-auto-model-timeout">
+            <span>{tr('botDefaults.autoModelCircuitMaxOpen')}</span>
+            <input type="number" min="5" max="86400" step="1" data-input="autoModelCircuitMaxOpen"
+              value={props.circuitMaxOpenSeconds} disabled={props.busy}
+              onChange={event => props.onCircuitMaxOpen(event.currentTarget.value)} />
+          </label>
+        </> : null}
       </> : null}
       <div className="bd-auto-model-save">
         <button type="button" className="primary" data-action="save-auto-model"

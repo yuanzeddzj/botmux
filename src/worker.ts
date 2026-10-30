@@ -4674,7 +4674,8 @@ function configureTraexAutoModel(
     if (lastInitConfig) lastInitConfig.codexRpcInput = false;
   }
   traexAutoModelController = managedAuto && cfg.traexAutoModel
-    ? new TraexAutoModelController(cfg.traexAutoModel, restoreRuntime, sharedSettings)
+    ? new TraexAutoModelController(cfg.traexAutoModel, restoreRuntime, sharedSettings,
+      cfg.traexAutoModelCircuitModel)
     : null;
   traexAutoModelSwitching = false;
   traexAutoModelTurnReplayForbidden = cfg.atMostOnce === true;
@@ -4699,6 +4700,31 @@ function configureTraexAutoModel(
     && cfg.dispatchAttempt === undefined) {
     traexAutoModelController.beginTurn(cfg.turnId);
   }
+}
+
+const traexAutoModelCircuitFailures = new Set<string>();
+function traexAutoModelCircuitKey(turnId: string, model: string): string {
+  return `${turnId}\0${model.toLowerCase()}`;
+}
+
+function reportTraexAutoModelCircuit(
+  outcome: 'capacity_queue' | 'success', turnId: string, model: string,
+): void {
+  if (!lastInitConfig?.traexAutoModel?.circuitBreaker) return;
+  const key = traexAutoModelCircuitKey(turnId, model);
+  if (outcome === 'capacity_queue') {
+    if (traexAutoModelCircuitFailures.has(key)) return;
+    traexAutoModelCircuitFailures.add(key);
+    if (traexAutoModelCircuitFailures.size > 256) {
+      const oldest = traexAutoModelCircuitFailures.values().next().value;
+      if (oldest) traexAutoModelCircuitFailures.delete(oldest);
+    }
+  } else if (traexAutoModelCircuitFailures.has(key)) return;
+  const lease = lastInitConfig.traexAutoModelCircuitLease;
+  send({
+    type: 'traex_auto_model_circuit', outcome, model, turnId,
+    ...(lease?.model.toLowerCase() === model.toLowerCase() ? { leaseToken: lease.token } : {}),
+  });
 }
 
 function traexAutoModelRuntimeEligible(): boolean {
@@ -4748,6 +4774,9 @@ function executeTraexAutoModelSwitch(
   if (opts.resumeCurrentTurn && (!active?.started || active.turnId !== action.turnId
     || active.dispatchAttempt !== undefined)) return false;
   if (!traexAutoModelController?.commitSwitch(action)) return false;
+  if (action.reason !== 'new_turn' && traexAutoModelController.config.circuitBreaker) {
+    reportTraexAutoModelCircuit('capacity_queue', action.turnId, action.fromModel);
+  }
   if (opts.resumeCurrentTurn && !enqueueTraexAutoModelRecovery(action.turnId)) {
     log(`TraeX auto-model switch refused: turn ${action.turnId.slice(0, 12)} lacks safe ordinary-turn authority`);
     return false;
@@ -4859,6 +4888,7 @@ function observeTraexAutoModelCapacity(screen: string): void {
       const choice = controller.resolveModelLoads(action.turnId, loads);
       if (choice.kind === 'switch') executeTraexAutoModelSwitch(choice, { resumeCurrentTurn: true });
       else if (choice.kind === 'exhausted') {
+        reportTraexAutoModelCircuit('capacity_queue', choice.turnId, choice.model);
         publishActiveRuntime({ model: controller.currentModel(), reasoningEffort: lastInitConfig?.reasoningEffort });
         send({ type: 'user_notify', turnId: choice.turnId, audience: 'owner',
           message: t('worker.traex_auto_model.lowest_load_hold', {
@@ -4874,6 +4904,7 @@ function observeTraexAutoModelCapacity(screen: string): void {
   } else if (action.kind === 'switch') {
     executeTraexAutoModelSwitch(action, { resumeCurrentTurn: true });
   } else if (action.kind === 'exhausted') {
+    reportTraexAutoModelCircuit('capacity_queue', action.turnId, action.model);
     publishActiveRuntime({ model: controller.currentModel(), reasoningEffort: lastInitConfig?.reasoningEffort });
     send({
       type: 'user_notify',
@@ -29075,6 +29106,9 @@ function emitTurnTerminal(
     return;
   }
   if (status !== 'completed') lastTurnFailureSurfacedAtMs = Date.now();
+  if (status === 'completed' && traexAutoModelController) {
+    reportTraexAutoModelCircuit('success', turnId, traexAutoModelController.currentModel());
+  }
   traexAutoModelController?.endTurn(turnId);
   const timing = turnExecutionClock.settle(turnId, dispatchAttempt, completedAtMs);
   if (status !== 'completed') {

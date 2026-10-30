@@ -165,7 +165,18 @@ import {
 import type { RemoteRunnerConfig } from '../adapters/backend/remote-runner-config.js';
 import { normalizeReplyFooter } from '../services/reply-footer.js';
 import { measureReplyTiming, type ReplyCardRenderSnapshot } from '../services/reply-card-render.js';
-import type { TraexAutoModelConfig } from '../services/traex-auto-model.js';
+import {
+  validTraexAutoModelRuntime,
+  type TraexAutoModelConfig,
+} from '../services/traex-auto-model.js';
+import {
+  recordTraexAutoModelCircuitFailure,
+  recordTraexAutoModelCircuitSuccess,
+  releaseTraexAutoModelCircuitLease,
+  restoreTraexAutoModelCircuitLease,
+  selectTraexAutoModelCircuit,
+  type TraexAutoModelCircuitLease,
+} from '../services/traex-auto-model-circuit.js';
 import { withCardRuntimeIdentity } from './card-runtime-identity.js';
 import { sandboxEnabled } from '../adapters/backend/sandbox.js';
 import { teardownSessionSandboxTree } from '../adapters/backend/sandbox-tree-teardown.js';
@@ -14622,6 +14633,8 @@ export function forkWorker(
   let startupState!: WorkerStartupState;
   let initMsg!: Extract<DaemonToWorker, { type: 'init' }>;
   let agentCfg!: ReturnType<typeof sessionAgentConfig>;
+  let traexAutoModelCircuitLease: TraexAutoModelCircuitLease | undefined;
+  let traexAutoModelCircuitModel: string | undefined;
   const t = tag(ds);
   ds.localProcessAttestation = undefined;
   try {
@@ -14740,6 +14753,41 @@ export function forkWorker(
   if (!isSharedAdoptSession(ds)) reclaimParkedCrashDiagnostic(ds);
 
   agentCfg = sessionAgentConfig(ds, botCfg);
+  if (agentCfg.traexAutoModel?.circuitBreaker) {
+    try {
+      const runtimeValid = validTraexAutoModelRuntime(
+        agentCfg.traexAutoModel,
+        ds.session.traexAutoModelRuntime,
+        ds.session.cliSessionId,
+      );
+      if (runtimeValid) {
+        traexAutoModelCircuitLease = restoreTraexAutoModelCircuitLease({
+          dataDir: config.session.dataDir,
+          appId: ds.larkAppId,
+          sessionId: ds.session.sessionId,
+          model: agentCfg.model!,
+          config: agentCfg.traexAutoModel,
+        });
+      } else {
+        const selection = selectTraexAutoModelCircuit({
+          dataDir: config.session.dataDir,
+          appId: ds.larkAppId,
+          sessionId: ds.session.sessionId,
+          config: agentCfg.traexAutoModel,
+          allowProbe: prompt.length > 0,
+        });
+        agentCfg.model = selection.model;
+        traexAutoModelCircuitModel = selection.model;
+        traexAutoModelCircuitLease = selection.lease;
+        recordLaunchModel(ds, selection.model);
+        if (selection.allProtected) {
+          logger.warn(`[${t}] TraeX auto-model circuit pool fully protected; using earliest recovery candidate ${selection.model}`);
+        }
+      }
+    } catch (error) {
+      logger.error(`[${t}] TraeX auto-model circuit unavailable; keeping session model: ${String(error)}`);
+    }
+  }
   if (!initTurnId && prompt.length > 0 && isCodexAppCliId(agentCfg.cliId)) {
     initAttributionTurnId = `codex-app-dispatch-${randomUUID()}`;
   }
@@ -15143,6 +15191,8 @@ export function forkWorker(
     model: agentCfg.model,
     traexAutoModel: agentCfg.traexAutoModel,
     traexAutoModelRuntime: ds.session.traexAutoModelRuntime,
+    ...(traexAutoModelCircuitLease ? { traexAutoModelCircuitLease } : {}),
+    ...(traexAutoModelCircuitModel ? { traexAutoModelCircuitModel } : {}),
     modelBackendVariant: agentCfg.modelBackendVariant,
     reasoningEffort: agentCfg.reasoningEffort,
     codexProfile: agentCfg.codexProfile,
@@ -15464,6 +15514,18 @@ export function forkWorker(
   // point are safe to compensate; clear the pre-init compensation handle.
   spawnedWorker = undefined;
   } catch (err) {
+    if (traexAutoModelCircuitLease) {
+      try {
+        releaseTraexAutoModelCircuitLease({
+          dataDir: config.session.dataDir,
+          appId: ds.larkAppId,
+          model: traexAutoModelCircuitLease.model,
+          token: traexAutoModelCircuitLease.token,
+        });
+      } catch (releaseError) {
+        logger.error(`[${t}] Failed to release unused TraeX auto-model recovery probe: ${String(releaseError)}`);
+      }
+    }
     if (ds.worker === spawnedWorker) {
       ds.worker = null;
       ds.workerPort = null;
@@ -17136,6 +17198,34 @@ function setupWorkerHandlers(
           sessionStore.updateSession(ds.session);
         }
         scheduleActiveRuntimePatch(ds);
+        break;
+      }
+
+      case 'traex_auto_model_circuit': {
+        if (
+          ds.worker !== worker
+          || ds.workerGeneration !== workerGeneration
+          || ds.session.workerGeneration !== workerGeneration
+          || effectiveCliId !== 'traex'
+          || !ds.initConfig?.traexAutoModel?.circuitBreaker
+          || !ds.initConfig.traexAutoModel.models.some(model => model.toLowerCase() === msg.model.toLowerCase())
+        ) {
+          logger.warn(`[${t}] Ignored TraeX auto-model circuit event from stale or invalid worker`);
+          break;
+        }
+        try {
+          const input = {
+            dataDir: config.session.dataDir,
+            appId: ds.larkAppId,
+            model: msg.model,
+            config: ds.initConfig.traexAutoModel,
+            leaseToken: msg.leaseToken,
+          };
+          if (msg.outcome === 'capacity_queue') recordTraexAutoModelCircuitFailure(input);
+          else recordTraexAutoModelCircuitSuccess(input);
+        } catch (error) {
+          logger.error(`[${t}] Failed to persist TraeX auto-model circuit event: ${String(error)}`);
+        }
         break;
       }
 

@@ -2406,6 +2406,9 @@ export function BotAgentSection(props: {
   const [autoModelSettings, setAutoModelSettings] = useState(autoDraftRef.current.modelSettings);
   const [autoTimeoutSeconds, setAutoTimeoutSeconds] = useState(autoDraftRef.current.timeoutSeconds);
   const [autoCooldownSeconds, setAutoCooldownSeconds] = useState(autoDraftRef.current.cooldownSeconds);
+  const [autoCircuitBreakerEnabled, setAutoCircuitBreakerEnabled] = useState(autoDraftRef.current.circuitBreakerEnabled);
+  const [autoCircuitOpenSeconds, setAutoCircuitOpenSeconds] = useState(autoDraftRef.current.circuitOpenSeconds);
+  const [autoCircuitMaxOpenSeconds, setAutoCircuitMaxOpenSeconds] = useState(autoDraftRef.current.circuitMaxOpenSeconds);
   const [autoDraftStorageFailed, setAutoDraftStorageFailed] = useState(false);
   const pendingAutoDefaults = useRef(new Set<string>());
   const savedAutoPreferences = useRef<string | undefined>(undefined);
@@ -2422,6 +2425,9 @@ export function BotAgentSection(props: {
     setAutoModelSettings(draft.modelSettings);
     setAutoTimeoutSeconds(draft.timeoutSeconds);
     setAutoCooldownSeconds(draft.cooldownSeconds);
+    setAutoCircuitBreakerEnabled(draft.circuitBreakerEnabled);
+    setAutoCircuitOpenSeconds(draft.circuitOpenSeconds);
+    setAutoCircuitMaxOpenSeconds(draft.circuitMaxOpenSeconds);
   }
   function editAutoDraft(patch: Partial<TraexAutoModelDraft>) {
     const next = { ...autoDraftRef.current, ...patch };
@@ -2708,6 +2714,14 @@ export function BotAgentSection(props: {
       enabled: true, models: autoModels, queueTimeoutMs: Number(autoTimeoutSeconds) * 1_000,
       reselectPerTurn: autoReselectPerTurn,
       switchCooldownMs: Number(autoCooldownSeconds) * 1_000,
+      ...(autoCircuitBreakerEnabled ? { circuitBreaker: {
+        enabled: true,
+        failureThreshold: 1,
+        openMs: Number(autoCircuitOpenSeconds) * 1_000,
+        maxOpenMs: Number(autoCircuitMaxOpenSeconds) * 1_000,
+        halfOpenMaxProbes: 1,
+        successThreshold: 1,
+      } } : {}),
       previousSettings: previousAutoSettings.current,
       modelSettings: Object.fromEntries(autoModels.filter(Boolean).map(model => [model,
         resolveTraexAutoModelSettings({ enabled: true, models: autoModels, queueTimeoutMs: 30_000, modelSettings: autoModelSettings },
@@ -3269,6 +3283,8 @@ export function BotAgentSection(props: {
           onReselectPerTurn={enabled => editAutoDraft({ reselectPerTurn: enabled })}
           modelSettings={autoModelSettings} capabilities={detectedModels?.modelCapabilities}
           timeoutSeconds={autoTimeoutSeconds} cooldownSeconds={autoCooldownSeconds}
+          circuitBreakerEnabled={autoCircuitBreakerEnabled}
+          circuitOpenSeconds={autoCircuitOpenSeconds} circuitMaxOpenSeconds={autoCircuitMaxOpenSeconds}
           candidates={modelCandidates.filter(candidate => candidate.toLowerCase() !== 'auto')}
           busy={agentBusy} onModels={models => {
             const current = autoDraftRef.current;
@@ -3286,6 +3302,9 @@ export function BotAgentSection(props: {
           }}
           onTimeout={seconds => editAutoDraft({ timeoutSeconds: seconds })}
           onCooldown={seconds => editAutoDraft({ cooldownSeconds: seconds })}
+          onCircuitBreakerEnabled={enabled => editAutoDraft({ circuitBreakerEnabled: enabled })}
+          onCircuitOpen={seconds => editAutoDraft({ circuitOpenSeconds: seconds })}
+          onCircuitMaxOpen={seconds => editAutoDraft({ circuitMaxOpenSeconds: seconds })}
           dirty={autoModelTouched} storageFailed={autoDraftStorageFailed} saveStatus={agentStatus?.text}
           onSave={() => void saveAgent()}
           onEnabled={enabled => {

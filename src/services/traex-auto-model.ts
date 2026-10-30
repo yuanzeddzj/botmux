@@ -3,6 +3,22 @@ export const TRAEX_AUTO_MODEL_DEFAULT_QUEUE_TIMEOUT_MS = 30_000;
 export const TRAEX_AUTO_MODEL_MIN_QUEUE_TIMEOUT_MS = 5_000;
 export const TRAEX_AUTO_MODEL_MAX_QUEUE_TIMEOUT_MS = 300_000;
 export const TRAEX_AUTO_MODEL_DEFAULT_SWITCH_COOLDOWN_MS = 60_000;
+export const TRAEX_AUTO_MODEL_DEFAULT_CIRCUIT_OPEN_MS = 10 * 60_000;
+export const TRAEX_AUTO_MODEL_DEFAULT_CIRCUIT_MAX_OPEN_MS = 30 * 60_000;
+
+export interface TraexAutoModelCircuitBreakerConfig {
+  enabled: true;
+  /** Confirmed capacity-queue observations needed before opening. */
+  failureThreshold: number;
+  /** Initial protection window. Repeated failed probes back off from here. */
+  openMs: number;
+  /** Upper bound for exponential protection-window backoff. */
+  maxOpenMs: number;
+  /** Concurrent recovery probes allowed for one bot/model. */
+  halfOpenMaxProbes: number;
+  /** Successful recovery probes needed to close the circuit. */
+  successThreshold: number;
+}
 
 export interface TraexAutoModelSettings {
   reasoningEffort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra';
@@ -27,6 +43,9 @@ export interface TraexAutoModelConfig {
   previousSettings?: TraexAutoModelPreviousSettings;
   queueTimeoutMs: number;
   switchCooldownMs?: number;
+  /** Off by default for backwards compatibility. When enabled, confirmed
+   * capacity queues are shared across this bot's sessions. */
+  circuitBreaker?: TraexAutoModelCircuitBreakerConfig;
 }
 
 export type TraexAutoModelConfigResult = {
@@ -157,6 +176,52 @@ export function normalizeTraexAutoModelConfig(raw: unknown): TraexAutoModelConfi
     return { error: 'traexAutoModel.switchCooldownMs must be an integer between 5000 and 300000' };
   }
 
+  let circuitBreaker: TraexAutoModelCircuitBreakerConfig | undefined;
+  if (value.circuitBreaker !== undefined && value.circuitBreaker !== null
+    && value.circuitBreaker !== false) {
+    if (!value.circuitBreaker || typeof value.circuitBreaker !== 'object'
+      || Array.isArray(value.circuitBreaker)) {
+      return { error: 'traexAutoModel.circuitBreaker must be an object' };
+    }
+    const circuit = value.circuitBreaker as Record<string, unknown>;
+    if (circuit.enabled !== true) {
+      return { error: 'traexAutoModel.circuitBreaker.enabled must be true' };
+    }
+    const failureThreshold = circuit.failureThreshold ?? 1;
+    const openMs = circuit.openMs ?? TRAEX_AUTO_MODEL_DEFAULT_CIRCUIT_OPEN_MS;
+    const maxOpenMs = circuit.maxOpenMs ?? TRAEX_AUTO_MODEL_DEFAULT_CIRCUIT_MAX_OPEN_MS;
+    const halfOpenMaxProbes = circuit.halfOpenMaxProbes ?? 1;
+    const successThreshold = circuit.successThreshold ?? 1;
+    if (!Number.isInteger(failureThreshold) || (failureThreshold as number) < 1
+      || (failureThreshold as number) > 10) {
+      return { error: 'traexAutoModel.circuitBreaker.failureThreshold must be an integer between 1 and 10' };
+    }
+    if (!Number.isInteger(openMs) || (openMs as number) < 5_000
+      || (openMs as number) > 3_600_000) {
+      return { error: 'traexAutoModel.circuitBreaker.openMs must be an integer between 5000 and 3600000' };
+    }
+    if (!Number.isInteger(maxOpenMs) || (maxOpenMs as number) < (openMs as number)
+      || (maxOpenMs as number) > 86_400_000) {
+      return { error: 'traexAutoModel.circuitBreaker.maxOpenMs must be an integer between openMs and 86400000' };
+    }
+    if (!Number.isInteger(halfOpenMaxProbes) || (halfOpenMaxProbes as number) < 1
+      || (halfOpenMaxProbes as number) > 10) {
+      return { error: 'traexAutoModel.circuitBreaker.halfOpenMaxProbes must be an integer between 1 and 10' };
+    }
+    if (!Number.isInteger(successThreshold) || (successThreshold as number) < 1
+      || (successThreshold as number) > 10) {
+      return { error: 'traexAutoModel.circuitBreaker.successThreshold must be an integer between 1 and 10' };
+    }
+    circuitBreaker = {
+      enabled: true,
+      failureThreshold: failureThreshold as number,
+      openMs: openMs as number,
+      maxOpenMs: maxOpenMs as number,
+      halfOpenMaxProbes: halfOpenMaxProbes as number,
+      successThreshold: successThreshold as number,
+    };
+  }
+
   return {
     config: {
       enabled: true,
@@ -166,6 +231,7 @@ export function normalizeTraexAutoModelConfig(raw: unknown): TraexAutoModelConfi
       ...(previousSettings !== undefined ? { previousSettings } : {}),
       queueTimeoutMs: queueTimeoutMs as number,
       ...(cooldown !== undefined ? { switchCooldownMs: cooldown as number } : {}),
+      ...(circuitBreaker ? { circuitBreaker } : {}),
     },
   };
 }
@@ -193,6 +259,7 @@ export interface TraexAutoModelRuntimeState {
 export function traexAutoModelPolicyKey(config: TraexAutoModelConfig): string {
   return JSON.stringify([config.models, config.reselectPerTurn === true,
     config.queueTimeoutMs, config.switchCooldownMs ?? TRAEX_AUTO_MODEL_DEFAULT_SWITCH_COOLDOWN_MS,
+    config.circuitBreaker ?? null,
     config.models.map(model => {
       const settings = resolveTraexAutoModelSettings(config, model);
       return [Object.prototype.hasOwnProperty.call(config.modelSettings ?? {}, model),
@@ -257,13 +324,16 @@ export class TraexAutoModelController {
   readonly sharedSettings?: TraexAutoModelSettings;
 
   constructor(readonly config: TraexAutoModelConfig, restored?: TraexAutoModelRuntimeState,
-    sharedSettings?: TraexAutoModelSettings) {
+    sharedSettings?: TraexAutoModelSettings, initialModel?: string) {
     this.sharedSettings = sharedSettings === undefined ? undefined : { ...sharedSettings };
     if (restored && restored.policyKey === traexAutoModelPolicyKey(config)
       && config.models.includes(restored.model)) {
       if (restored.sharedSettings) this.sharedSettings = { ...restored.sharedSettings };
       this.currentIndex = config.models.indexOf(restored.model);
       this.exhausted = restored.waitingOnFinalModel;
+    } else if (initialModel) {
+      const index = config.models.findIndex(model => model.toLowerCase() === initialModel.toLowerCase());
+      if (index >= 0) this.currentIndex = index;
     }
   }
 

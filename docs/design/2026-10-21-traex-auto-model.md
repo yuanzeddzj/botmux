@@ -15,12 +15,22 @@
     },
     "queueTimeoutMs": 30000,
     "reselectPerTurn": false,
-    "switchCooldownMs": 60000
+    "switchCooldownMs": 60000,
+    "circuitBreaker": {
+      "enabled": true,
+      "failureThreshold": 1,
+      "openMs": 600000,
+      "maxOpenMs": 1800000,
+      "halfOpenMaxProbes": 1,
+      "successThreshold": 1
+    }
   }
 }
 ```
 
 模型池无数量上限。每个模型下方独立选择思考强度与上下文；Standard / Max 及容量、可用思考档位来自 TraeX 实时目录。空设置表示使用该模型默认；缺少条目继承独立保存的共享设置，不能继承上个模型的覆盖值。共享设置随原生恢复状态保存，同 Worker 重启时保留已选模型和共享设置；旧版仅字符串池继续兼容共享设置。切换与启用下一回合恢复首选时同时更新两项覆盖，卡片显示当前档位。
+
+`circuitBreaker` 可选且默认关闭。启用后，daemon 在 dataDir 的 `traex-auto-model-circuits.json` 按 Lark app ID + 具体模型持久化 CLOSED / OPEN / HALF_OPEN。只有经过现有持续排队阈值确认的容量队列计为失败；普通 CLI 崩溃、工具失败和业务错误不计入。达到 `failureThreshold` 后 OPEN，新话题跳过该模型；同一话题已恢复的有效模型继续按原会话合同运行。OPEN 到期进入 HALF_OPEN，并通过跨进程文件锁最多发放 `halfOpenMaxProbes` 个租约；空提示词的 daemon 恢复不占探针。成功终态累计到 `successThreshold` 后回到 CLOSED，探针再次确认排队则重新 OPEN，保护时长从 `openMs` 指数增长并受 `maxOpenMs` 限制。所有模型都受保护时，为避免黑洞，选择最早可恢复项继续等待，但不额外授予探针，因此不能用这次兜底成功提前关闭熔断。
 
 页面只显示「模型排队时，自动切换到模型池中其他不排队的模型。」，详细规则在问号的 hover/focus 提示中。该说明表达自动寻找可用模型的目标；负载快照不保证一次尝试即可免排队。
 

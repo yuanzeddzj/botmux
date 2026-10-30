@@ -63,7 +63,8 @@ function rows(path: string): any[] {
 async function fixture(enabled: boolean, loadData: false | 'busy' | 'ordered' = false, reselectPerTurn = false,
   rpcPolicy?: { override?: boolean; global: boolean }, restoreWithoutBanner = false, startupExtraArgs?: string,
   freshStart = false, activityMode?: 'working' | 'queue-after-second' | 'delayed-first-queue', terminalDelayMs = 0,
-  delaySecondModelOrderNoticeMs = 0, exitFirstReplacement = false, holdPreferredSuccessor = false) {
+  delaySecondModelOrderNoticeMs = 0, exitFirstReplacement = false, holdPreferredSuccessor = false,
+  circuitBreaker = false) {
   const root = mkdtempSync(join(tmpdir(), 'botmux-auto-model-'));
   roots.push(root);
   const dataDir = join(root, 'session');
@@ -292,12 +293,18 @@ if (__realSend) process.send = function (msg: any, callback?: any): boolean {
     ...(rpcPolicy ? { codexRpcInput: resolveCodexRpcInput('traex', rpcPolicy.override, rpcPolicy.global) } : {}),
     ...(enabled ? { traexAutoModel: { enabled: true, models: ['core', 'backup', 'last'], queueTimeoutMs: 5_000, switchCooldownMs: 5_000,
       reselectPerTurn,
+      ...(circuitBreaker ? { circuitBreaker: { enabled: true, failureThreshold: 1, openMs: 600_000,
+        maxOpenMs: 1_800_000, halfOpenMaxProbes: 1, successThreshold: 1 } } : {}),
       ...(loadData ? { modelSettings: {
         core: { reasoningEffort: 'high', modelBackendVariant: 'standard' },
         backup: { reasoningEffort: 'xhigh', modelBackendVariant: 'standard' },
         last: { reasoningEffort: 'xhigh', modelBackendVariant: 'max' },
       } } : {}),
     } } : {}),
+    ...(circuitBreaker ? {
+      traexAutoModelCircuitModel: 'core',
+      traexAutoModelCircuitLease: { model: 'core', token: 'probe-token', acquiredAtMs: 1 },
+    } : {}),
     larkAppId: 'app_test', larkAppSecret: 'secret' } satisfies DaemonToWorker;
   child.send(init);
   if (startupExtraArgs) await wait(() => messages.some(message => message.type === 'error' && message.message.includes('cannot be overridden')), 'rejected external model argv');
@@ -306,6 +313,30 @@ if (__realSend) process.send = function (msg: any, callback?: any): boolean {
 }
 
 describe('TraeX auto-model real Worker and PTY', () => {
+  it('reports exact durable-circuit observations from real queue and terminal boundaries', async () => {
+    const queued = await fixture(true, 'busy', false, undefined, false, undefined,
+      false, undefined, 0, 0, false, false, true);
+    queued.child.send({ type: 'message', content: 'queued ask', turnId: 'om_queued' } satisfies DaemonToWorker);
+    await queued.wait(() => queued.messages.some(message => message.type === 'traex_auto_model_circuit'
+      && message.outcome === 'capacity_queue'), 'capacity circuit observation');
+    expect(queued.messages.filter(message => message.type === 'traex_auto_model_circuit'
+      && message.outcome === 'capacity_queue' && message.model === 'core')).toEqual([
+      expect.objectContaining({ turnId: 'om_queued', leaseToken: 'probe-token' }),
+    ]);
+
+    const healthy = await fixture(true, false, false, undefined, false, undefined,
+      false, 'working', 0, 0, false, false, true);
+    healthy.child.send({ type: 'message', content: 'healthy ask', turnId: 'om_healthy' } satisfies DaemonToWorker);
+    await healthy.wait(() => rows(healthy.submissions).length === 1, 'healthy circuit submit');
+    writeFileSync(healthy.release, 'complete');
+    await healthy.wait(() => healthy.messages.some(message => message.type === 'traex_auto_model_circuit'
+      && message.outcome === 'success'), 'successful circuit observation');
+    expect(healthy.messages.filter(message => message.type === 'traex_auto_model_circuit')).toEqual([
+      expect.objectContaining({ outcome: 'success', turnId: 'om_healthy', model: 'core',
+        leaseToken: 'probe-token' }),
+    ]);
+  }, 70_000);
+
   it('keeps planned model recovery silent and still reports a later genuine crash', async () => {
     const f = await fixture(true, 'busy');
     f.child.send({ type: 'message', content: 'original ask', turnId: 'om_original' } satisfies DaemonToWorker);
