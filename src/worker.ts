@@ -331,8 +331,8 @@ import { CodexServiceTierTracker, resolveCodexServiceTierSnapshot } from './serv
 import { validateCodexServiceTier } from './services/codex-service-tier-catalog.js';
 import { WORKER_IPC_HANDLER_READY_EVENT } from './worker-ipc-preload.js';
 import { resolveTraexOwnershipPid, scheduleTraexLeafPidResolve } from './core/traex-leaf-pid.js';
-import { pinSandboxedTraeHome } from './services/traex-paths.js';
-import { drainTraexRollout, findTraexRolloutBySessionId, findTraexRolloutByPid, findTraexRolloutSetByPid, readLatestTraexRuntime, traexHistorySidIsOwned, traexSessionIdFromRolloutPath, type TraexDrainResult, type TraexRuntimeSnapshot } from './services/traex-transcript.js';
+import { pinWorkerTraeHome } from './services/traex-paths.js';
+import { drainTraexRollout, traexResumeTargetLeftInDefaultHome, findTraexRolloutBySessionId, findTraexRolloutByPid, findTraexRolloutSetByPid, readLatestTraexRuntime, traexHistorySidIsOwned, traexSessionIdFromRolloutPath, type TraexDrainResult, type TraexRuntimeSnapshot } from './services/traex-transcript.js';
 import { bridgeCodexUserInput } from './services/codex-user-input.js';
 import { cocoEventsPathForSession, drainCocoEvents, findCocoSessionByPid } from './services/coco-transcript.js';
 import { currentHermesStateOffset, drainHermesStateDb, resolveHermesStateDbPath } from './services/hermes-transcript.js';
@@ -1449,6 +1449,7 @@ async function prepareCodexNativeTitleGeneration(
  *  spawns; it renders as history and later turns stream live. "thread ready" is
  *  thus a distinct step from "first turn sent". */
 async function engageCodexRpc(cfg: Extract<DaemonToWorker, { type: 'init' }>): Promise<EngageOutcome> {
+  followBotTraeHome(cfg);
   if (cfg.cliInstanceBinding && cfg.cliInstanceBinding.source !== 'legacy' && cfg.backendType === 'tmux') {
     assertManagedTmuxInstanceIdentity(cfg);
   }
@@ -2615,8 +2616,20 @@ function drainArgvDurableInitialPromptCompletion(): boolean {
 // CLI leaf. credentialOnlyBwrap needs host probes so it can't be recomputed from
 // cfg at gate-check time; capture the spawn-time verdict for currentTraexObservedPid.
 let lastSpawnOuterBwrapActive = false;
-// TRAE_HOME the worker inherited (before any per-spawn sandbox pin below).
+// TRAE_HOME the worker inherited (before any per-bot pin, see followBotTraeHome).
 const workerBootTraeHome = process.env.TRAE_HOME?.trim() || undefined;
+
+/** Point the worker's own TRAE readers at the TRAE_HOME this bot's CLI runs
+ *  with. Called at both entry points that read TRAE files: RPC engagement
+ *  (rollout probe before spawn) and spawnCli. */
+function followBotTraeHome(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
+  pinWorkerTraeHome(process.env, {
+    cliId: cfg.cliId,
+    adoptMode: cfg.adoptMode === true,
+    perBotEnv: botInjectedEnv(cfg.env, cfg.envPolicy),
+    bootTraeHome: workerBootTraeHome,
+  });
+}
 // True when getChildPid() may be a launcher above the real TRAE process. This
 // includes bwrap and Forge; keep it separate from lastSpawnOuterBwrapActive
 // because prompt-readiness code has bwrap-specific shell handling.
@@ -3477,6 +3490,29 @@ function holdStructuredStartLeasesWhileCliStarting(): void {
  *  recognized startup blocker the honest message is "not started", not "sent
  *  but missing from the transcript"; a first turn that stalled right after a
  *  CLI upgrade says so. */
+let traexDefaultHomeResumeNoticeSent = false;
+
+/** The resume target lives only in the default ~/.trae while this bot's CLI
+ *  runs with its own TRAE_HOME: TRAE cannot open it there. Typically a session
+ *  started before the bot got a TRAE_HOME. Botmux does not read the old root
+ *  (an id found there is still one the CLI cannot resume); say why instead. */
+function noteTraexResumeTargetLeftInDefaultHome(cliSessionId: string): void {
+  if (traexDefaultHomeResumeNoticeSent) return;
+  const defaultHome = traexResumeTargetLeftInDefaultHome(cliSessionId);
+  if (!defaultHome) return;
+  traexDefaultHomeResumeNoticeSent = true;
+  log(`TRAE resume target ${cliSessionId} exists only under ${defaultHome}, not under TRAE_HOME=${process.env.TRAE_HOME}`);
+  send({
+    type: 'user_notify',
+    message: t('worker.traex_resume_target_in_default_home', {
+      sessionId: cliSessionId,
+      defaultHome,
+      traeHome: process.env.TRAE_HOME ?? '',
+    }),
+    turnId: currentBotmuxTurnId,
+  });
+}
+
 function uncollectedStructuredTurnNotice(): string {
   const blocked = freshCliNeverReady() && startupBlocker?.generation === cliSpawnGeneration
     ? startupBlocker.blocker
@@ -20380,6 +20416,7 @@ async function spawnCli(
   cfg: Extract<DaemonToWorker, { type: 'init' }>,
   opts: { pluginGenerationPrepared?: boolean; exactResumeSessionId?: string; restartCause?: CliRestartCause } = {},
 ): Promise<void> {
+  followBotTraeHome(cfg);
   if (!codexRpcEngine) codexCleanupLaunchTarget = undefined;
   remoteRunnerRecoveredTurnInFlight = false;
   // Probed once at the early gate and reused at the final child-env gate so a
@@ -22700,12 +22737,6 @@ async function spawnCli(
     }
   }
   const perBotInjectEnv = botInjectedEnv(cfg.env, cfg.envPolicy);
-  pinSandboxedTraeHome(process.env, {
-    sandboxed: sandboxRequested,
-    cliId: cliAdapter.id,
-    perBotEnv: perBotInjectEnv,
-    bootTraeHome: workerBootTraeHome,
-  });
   const boundLark = !!process.env.SESSION_DATA_DIR && usesLarkToolBinding(cfg, process.env.SESSION_DATA_DIR, isWorkflowWorker());
   if (!boundLark && process.env.SESSION_DATA_DIR) {
     cleanupLarkToolBinding(process.env.SESSION_DATA_DIR, cfg.sessionId);
@@ -22765,6 +22796,9 @@ async function spawnCli(
   if (boundLark) {
     identityShellEnv.BOTMUX_LARK_TOOL_BINDING = larkToolBindingPath(identityDataDir!, cfg.sessionId);
     if (process.env.BOTMUX_DAEMON_IPC_PORT) identityShellEnv.BOTMUX_DAEMON_IPC_PORT = process.env.BOTMUX_DAEMON_IPC_PORT;
+  }
+  if (cfg.cliId === 'traex' && !cfg.adoptMode && effectiveResume && effectiveCliSessionId) {
+    noteTraexResumeTargetLeftInDefaultHome(effectiveCliSessionId);
   }
   const args = cliAdapter.buildArgs({
     sessionId: effectiveAdapterSessionId,

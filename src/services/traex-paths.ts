@@ -19,20 +19,22 @@ export function traeHomeFor(env: NodeJS.ProcessEnv): string {
 }
 
 /**
- * A per-bot TRAE_HOME reaches only the CLI child. Under the sandbox the child
- * sees only binds computed from its own TRAE_HOME, so the worker's own readers
- * (state DB / history / rollouts / Gateway config, all via traeHome()) must
- * follow it too, or resume lookup and submit confirmation read a root the CLI
- * never writes. Re-derived from the boot value on every spawn so a removed
- * override does not stick. Unsandboxed sessions and other CLIs: untouched.
+ * A per-bot TRAE_HOME reaches only the CLI child, never the worker's own
+ * process.env. The worker's readers (state DB / history.jsonl / rollouts /
+ * Gateway config, all via traeHome()) must read the root the CLI writes, or
+ * submit confirmation and resume lookup look in ~/.trae while the CLI works
+ * elsewhere (and the sandbox binds the wrong root). Re-derived from the boot
+ * value on every call so a removed override does not stick; with no per-bot
+ * value the result is exactly the inherited TRAE_HOME. Adopted panes are left
+ * alone: that process was not started with this bot's env. Other CLIs: untouched.
  */
-export function pinSandboxedTraeHome(env: NodeJS.ProcessEnv, opts: {
-  sandboxed: boolean;
+export function pinWorkerTraeHome(env: NodeJS.ProcessEnv, opts: {
   cliId: string;
+  adoptMode: boolean;
   perBotEnv: Record<string, string>;
   bootTraeHome: string | undefined;
 }): void {
-  if (!opts.sandboxed || (opts.cliId !== 'traex' && opts.cliId !== 'coco')) return;
+  if (opts.adoptMode || (opts.cliId !== 'traex' && opts.cliId !== 'coco')) return;
   const value = opts.perBotEnv.TRAE_HOME?.trim() || opts.bootTraeHome;
   if (value) env.TRAE_HOME = value;
   else delete env.TRAE_HOME;

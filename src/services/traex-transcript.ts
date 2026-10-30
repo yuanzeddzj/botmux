@@ -44,6 +44,7 @@ import {
   statSync,
   type Dirent,
 } from 'node:fs';
+import { homedir } from 'node:os';
 import { basename, isAbsolute, join, relative, sep } from 'node:path';
 import {
   splitCodexEventsByCutoff,
@@ -69,7 +70,7 @@ import { openDatabaseSyncNow } from './sqlite-compat.js';
 import { isBotmuxInjectedPrompt } from './resumable-session-discovery.js';
 import { isBotmuxGoalObjective } from '../workflows/v3/contract.js';
 import { beginJsonlDrain, iterateJsonlLines } from './jsonl-cursor.js';
-import { traeSessionsRoot, traeStateDbPath } from './traex-paths.js';
+import { traeHome, traeSessionsRoot, traeStateDbPath } from './traex-paths.js';
 import { listProcessOpenFiles } from '../utils/process-open-files.js';
 
 export { splitCodexEventsByCutoff as splitTraexEventsByCutoff };
@@ -1734,6 +1735,28 @@ export function findTraexRolloutBySessionId(cliSessionId: string): string | unde
   return undefined;
 }
 
+
+/**
+ * The default-root path when `cliSessionId` has a rollout under the default
+ * ~/.trae but none under the TRAE_HOME in effect (a bot that got its own
+ * TRAE_HOME after the session started there); undefined otherwise, including
+ * when no TRAE_HOME override is in effect.
+ */
+export function traexResumeTargetLeftInDefaultHome(cliSessionId: string): string | undefined {
+  const defaultHome = join(homedir(), '.trae');
+  if (!cliSessionId || traeHome() === defaultHome) return undefined;
+  if (findTraexRolloutBySessionId(cliSessionId)) return undefined;
+  // The finders resolve their root from process.env on every call; look once
+  // under the default root and put the override back before returning.
+  const configured = process.env.TRAE_HOME;
+  process.env.TRAE_HOME = defaultHome;
+  try {
+    return findTraexRolloutBySessionId(cliSessionId) ? defaultHome : undefined;
+  } finally {
+    if (configured === undefined) delete process.env.TRAE_HOME;
+    else process.env.TRAE_HOME = configured;
+  }
+}
 
 /** Find the newest TRAE native session whose first prompt contains Botmux's
  *  session id. This mirrors Codex's history.jsonl bridge, but TRAE keeps the
