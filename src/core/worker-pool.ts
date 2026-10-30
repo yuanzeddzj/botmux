@@ -22,7 +22,7 @@ import { sandboxBoolValue, normalizeSandboxMode, normalizeScratchStorage } from 
  * Worker pool — manages forking, killing, and lifecycle of worker processes.
  * Extracted from daemon.ts for modularity.
  */
-import { execSync, type ChildProcess } from 'node:child_process';
+import { execSync, execFileSync, type ChildProcess } from 'node:child_process';
 import { join, dirname, basename } from 'node:path';
 import { homedir } from 'node:os';
 import { installCursorUsageHook } from '../services/cursor-usage-hook.js';
@@ -41,6 +41,10 @@ import { cursorUsageHookCommand, hookCommandFor } from '../adapters/hook-command
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { mayRestoreWriteAdmission } from '../adapters/backend/destroy-result.js';
 import { config } from '../config.js';
+import { currentTopicExecutionContext, topicExecutionAllowed } from '../services/exclusive-topic-owner.js';
+import { waitForTopicWorkerExit, topicProcessExited, containTopicProcessTree } from './topic-ownership-revoke.js';
+import { readProcessStartIdentity } from '../utils/process-identity.js';
+import { stopSessionScope } from './session-scope.js';
 import { readGlobalConfig, isWorkflowFeatureEnabled } from '../global-config.js';
 import { workerExitDashboardEvent } from './worker-exit-dashboard-event.js';
 import { checkWorkerAdmission, formatMemoryBytes, tierWorkerAdmission, type WorkerAdmissionDecision } from './worker-budget.js';
@@ -147,7 +151,7 @@ import { groupContextEpoch, commitGroupContextDispatchIntoPayload } from '../ser
 import { replyToDocComment, chunkCommentText, unsubscribeDocFile, removeCommentReaction } from '../im/lark/doc-comment.js';
 import { listDocSubscriptionsForSession, removeDocSubscription } from '../services/doc-subs-store.js';
 import { TmuxBackend } from '../adapters/backend/tmux-backend.js';
-import { managedTmuxCandidateSockets, preferredManagedTmuxSocket, tmuxServerLabel } from '../adapters/backend/tmux-socket.js';
+import { managedTmuxCandidateSockets, preferredManagedTmuxSocket, tmuxServerLabel, tmuxSocketArgs } from '../adapters/backend/tmux-socket.js';
 import { HerdrBackend } from '../adapters/backend/herdr-backend.js';
 import { ZmxBackend } from '../adapters/backend/zmx-backend.js';
 import { zmxEnv } from '../setup/ensure-zmx.js';
@@ -217,6 +221,7 @@ type WorkerIpcBootstrapState = {
 };
 
 const workerIpcBootstrapStates = new WeakMap<ChildProcess, WorkerIpcBootstrapState>();
+const workerTopicPermissions = new WeakMap<ChildProcess, { chatId: string; rootId: string; larkAppId: string; epoch: number }>();
 const STANDALONE_WORKER_IPC_BOOTSTRAP_TIMEOUT_MS = 30_000;
 
 function initializeWorkerIpcBootstrap(worker: ChildProcess): void {
@@ -269,13 +274,17 @@ function releaseWorkerIpcBootstrap(
 }
 
 function afterWorkerIpcBootstrap(worker: ChildProcess, dispatch: () => void): boolean {
+  const topic = workerTopicPermissions.get(worker);
+  const allowed = () => !topic || topicExecutionAllowed(config.session.dataDir, topic);
+  if (!allowed()) return false;
+  const guardedDispatch = () => { if (allowed()) dispatch(); };
   const state = workerIpcBootstrapStates.get(worker);
   if (!state || state.ready) {
-    dispatch();
+    guardedDispatch();
     return true;
   }
   if (worker.killed || worker.connected === false) return false;
-  state.pending.push(dispatch);
+  state.pending.push(guardedDispatch);
   return true;
 }
 
@@ -7111,6 +7120,7 @@ export function requestSessionRestart(
   observer: RestartObserver,
   opts: SessionRestartOptions = {},
 ): SessionRestartRequest | undefined {
+  if (!exclusiveTopicWorkerAllowed(ds)) return undefined;
   if (isSessionTransferring(ds)) {
     logger.warn(`[${tag(ds)}] Restart refused while routing transfer is in progress`);
     return undefined;
@@ -9242,6 +9252,101 @@ export function suspendWorker(ds: DaemonSession, reason = 'suspended_idle'): boo
   return true;
 }
 
+/** Ownership transfers stop producing turns immediately and wait for physical
+ * teardown. The logical session and its on-disk transcript remain resumable. */
+export async function suspendTopicWorkerVerified(ds: DaemonSession): Promise<boolean> {
+  if (ds.adoptedFrom || ds.session.adoptedFrom || ds.initConfig?.adoptMode
+    || hasProtectedSessionMutationOwnership(ds) || isSessionTransferring(ds)) return false;
+  const workers = new Set(retiringWorkersForSession(ds.session.sessionId));
+  if (ds.worker) workers.add(ds.worker);
+  const attestation = ds.localProcessAttestation;
+  const processes = [
+    { pid: attestation?.cliPid, start: attestation?.cliProcStart },
+    { pid: attestation?.enginePid, start: attestation?.engineProcStart },
+  ].filter(entry => entry.pid !== undefined).map(entry => ({
+    pid: entry.pid!, start: entry.start ?? readProcessStartIdentity(entry.pid!),
+  }));
+  const backend = ds.initConfig?.backendType ?? ds.session.backendType;
+  const roots = processes.filter(entry => !topicProcessExited(entry.pid, entry.start)).map(entry => entry.pid);
+  for (const worker of workers) {
+    if (worker.pid && worker.exitCode === null && worker.signalCode === null) roots.push(worker.pid);
+  }
+  if (backend === 'tmux') {
+    const target = persistentBackendTargetForSession(ds);
+    if (!target || target.backendType !== 'tmux') return false;
+    const probe = TmuxBackend.probeSessionForTeardown(target.sessionName, target.socketName);
+    if (probe === 'unknown') return false;
+    if (probe === 'exists') {
+      try {
+        const paneRoots = execFileSync('tmux', [...tmuxSocketArgs(target.socketName), 'list-panes', '-s', '-t', target.sessionName, '-F', '#{pane_pid}'], {
+          encoding: 'utf8', timeout: 2_000, stdio: ['ignore', 'pipe', 'ignore'],
+        }).trim().split(/\s+/).map(Number);
+        roots.push(...paneRoots);
+      } catch { return false; }
+    } else if (workers.size === 0 && processes.length === 0 && !ds.session.suspendedColdResume) {
+      return false; // missing pane without a prior retirement proof is ambiguous
+    }
+  } else if (backend !== 'pty' && processes.length === 0 && !ds.session.suspendedColdResume) {
+    return false; // other persistent backends need attested process identities
+  }
+  if (backend === 'pty' && (ds.workerReady || ds.cliReady) && processes.length === 0) return false;
+  let frozen: Awaited<ReturnType<typeof containTopicProcessTree>>;
+  try { frozen = await containTopicProcessTree(roots); }
+  catch (error) {
+    logger.warn(`[topic-owner] producer freeze unverified: ${String(error)}`);
+    return false;
+  }
+  try {
+    processes.push(...frozen.processes);
+    if (backend === 'pty') {
+      if (ds.worker && !ds.worker.killed) killWorker(ds);
+    } else if (ds.worker && !ds.worker.killed) {
+      if (!suspendWorker(ds, 'topic_owner_changed')) return false;
+    } else {
+      if (!isSuspendableBackendType(backend) || !suspendBackingVerifier(ds)) return false;
+    }
+    // The kernel scope also owns children forked after the snapshot. Retire
+    // the whole exact scope before admitting the successor, even on cgroup v1.
+    frozen.retire?.();
+    for (const entry of frozen.processes) {
+      if (readProcessStartIdentity(entry.pid) !== entry.start) continue;
+      try { process.kill(entry.pid, 'SIGKILL'); } catch { /* verify below */ }
+    }
+    const exited = await Promise.all([...workers].map(worker => waitForTopicWorkerExit(worker)));
+    if (exited.some(ok => !ok)) return false;
+    stopSessionScope(ds.session.sessionId);
+    const deadline = Date.now() + 2_000;
+    while (processes.some(entry => !topicProcessExited(entry.pid, entry.start)) && Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 25));
+    }
+    if (processes.some(entry => !topicProcessExited(entry.pid, entry.start))) return false;
+    ds.session.exclusiveTopicOwnerEpoch = undefined;
+    ds.hasHistory = true;
+    ds.session.suspendedColdResume = true;
+    sessionStore.updateSessionPid(ds.session.sessionId, null);
+    sessionStore.updateSession(ds.session);
+    return true;
+  } finally { frozen.release(); }
+}
+
+function exclusiveTopicWorkerAllowed(ds: DaemonSession): boolean {
+  if (ds.chatType !== 'group' || ds.session.scope === 'chat'
+    || !ds.session.rootMessageId?.startsWith('om_')) return true;
+  const bot = getAllBots().find(entry => entry.config.larkAppId === ds.larkAppId);
+  if (bot?.config.exclusiveTopicOwner !== true) return true;
+  const context = currentTopicExecutionContext();
+  const matches = context?.chatId === ds.chatId && context.rootId === ds.session.rootMessageId;
+  const epoch = matches ? context.epoch : ds.session.exclusiveTopicOwnerEpoch;
+  if (epoch === undefined || !topicExecutionAllowed(config.session.dataDir, {
+    chatId: ds.chatId, rootId: ds.session.rootMessageId, larkAppId: ds.larkAppId, epoch,
+  })) return false;
+  if (matches && ds.session.exclusiveTopicOwnerEpoch !== epoch) {
+    ds.session.exclusiveTopicOwnerEpoch = epoch;
+    sessionStore.updateSession(ds.session);
+  }
+  return true;
+}
+
 /**
  * Cash in a queued suspend. Called once the session leaves the producing states
  * it was queued for; a no-op during working/analyzing — that IS why it queued.
@@ -10874,6 +10979,12 @@ function retryOrFailOrdinaryImDelivery(
 
 function sendOrdinaryImDeliveryAttempt(record: OrdinaryImDelivery): boolean {
   if (pendingOrdinaryImDeliveries.get(record.key) !== record) return false;
+  const topic = workerTopicPermissions.get(record.worker);
+  if (!exclusiveTopicWorkerAllowed(record.ds)
+    || (topic && !topicExecutionAllowed(config.session.dataDir, topic))) {
+    clearOrdinaryImDelivery(record);
+    return false;
+  }
   if (
     record.ds.worker !== record.worker
     || record.worker.killed
@@ -11259,6 +11370,7 @@ export function sendWorkerSessionInput(
   ds: DaemonSession,
   message: TransferBufferedInput,
 ): boolean {
+  if (!exclusiveTopicWorkerAllowed(ds)) return false;
   // Evaluate the cheap message-shape guards FIRST: getBot() THROWS for an
   // unregistered app (IPC tests / in-flight teardown), and every other input
   // type (inject_command, set_display_mode, …) must reach worker.send without
@@ -11278,18 +11390,23 @@ export function sendWorkerSessionInput(
   if (bufferTransferInput(ds, annotated)) return true;
   const worker = ds.worker;
   if (!worker || worker.killed) return false;
-  return afterWorkerIpcBootstrap(worker, () => worker.send(annotated));
+  return afterWorkerIpcBootstrap(worker, () => {
+    if (ds.worker === worker && exclusiveTopicWorkerAllowed(ds)) worker.send(annotated);
+  });
 }
 
 /** Prompt-cache keep-alive delivery. Deliberately NOT routed through the
  *  transfer buffer: a keep-alive is only worth sending to the CLI that holds
  *  the warm cache right now, never replayed into a replacement worker. */
 export function sendPromptCacheKeepalive(ds: DaemonSession, text: string): boolean {
+  if (!exclusiveTopicWorkerAllowed(ds)) return false;
   const worker = ds.worker;
   if (!worker || worker.killed || transferInputGates.has(ds)) return false;
   const message: DaemonToWorker = { type: 'prompt_cache_keepalive', text };
   try {
-    return afterWorkerIpcBootstrap(worker, () => worker.send(message));
+    return afterWorkerIpcBootstrap(worker, () => {
+      if (ds.worker === worker && exclusiveTopicWorkerAllowed(ds)) worker.send(message);
+    });
   } catch {
     return false;
   }
@@ -13029,6 +13146,7 @@ export function sendWorkerInput(
     trustedCaller?: TrustedCaller;
   } = {},
 ): boolean {
+  if (!exclusiveTopicWorkerAllowed(ds)) return false;
   cancelDeploymentContinuation(ds.session, previous => sessionStore.updateDeploymentContinuation(ds.session, previous));
   const remoteRetirementPhase = remoteRetirementAdmissionPhase(ds);
   if (remoteRetirementPhase) {
@@ -14005,6 +14123,7 @@ export function forkWorker(
     opts.onAdmission?.(admission);
   };
   const continuationStillAllowed = (): boolean => {
+    if (!exclusiveTopicWorkerAllowed(ds)) return false;
     const claim = opts.deploymentContinuation;
     return !claim || (deploymentContinuationClaimCurrent(ds.session, claim)
       && canTalk(ds.larkAppId, ds.chatId, claim.caller.requestUserOpenId, undefined,
@@ -15285,6 +15404,10 @@ export function forkWorker(
   // refork, restore, cold resume, queued activation — clears it exactly once.
   ds.cliReady = false;
   ds.worker = worker;
+  if (ds.chatType === 'group' && ds.session.scope !== 'chat' && ds.session.exclusiveTopicOwnerEpoch !== undefined) {
+    workerTopicPermissions.set(worker, { chatId: ds.chatId, rootId: ds.session.rootMessageId,
+      larkAppId: ds.larkAppId, epoch: ds.session.exclusiveTopicOwnerEpoch });
+  }
   initializeWorkerIpcBootstrap(worker);
   rememberScheduledTurnCaller(ds, initAttributionTurnId, initTrustedCaller);
   {
@@ -21915,6 +22038,7 @@ export function forkAdoptWorker(
     onIpcDispatchAttempted?: () => void;
   },
 ): 'accepted' | 'rejected' {
+  if (!exclusiveTopicWorkerAllowed(ds)) return 'rejected';
   if (ds.session.cliInstanceBinding) throw new Error('External adoption cannot carry a Codex instance binding');
   if (isSessionTransferring(ds)) {
     logger.warn(`[${tag(ds)}] Adopt worker fork refused during routing transfer`);

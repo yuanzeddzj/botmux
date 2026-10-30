@@ -526,6 +526,8 @@ export interface Session {
    *  a webhook whose topic seed is explicitly disabled is the one topicless
    *  exception and keeps its automation session chat-scoped. */
   scope?: 'thread' | 'chat';
+  /** Epoch admitted by the shared topic coordinator; stale continuations cannot rebind it. */
+  exclusiveTopicOwnerEpoch?: number;
   /** This chat-scoped automation deliberately has no topic seed. Prevents the
    *  chat-mode conversion guard from treating chatId as a replyable message id. */
   externalTriggerTopicless?: boolean;

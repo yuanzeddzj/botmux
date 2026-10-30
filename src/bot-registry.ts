@@ -2452,6 +2452,9 @@ export interface BotConfig {
    * `soloGroupMentionBypass` / `chatSoloGroupMentionBypass`.
    */
   regularGroupMentionMode?: 'always' | 'topic' | 'never' | 'ambient';
+  /** Persist one responder per group topic; explicit human @mentions hand it
+   * to another bot only after the predecessor has stopped executing. */
+  exclusiveTopicOwner?: boolean;
   /** Allow the single-human/single-bot group exception to the @ policy (default true). */
   soloGroupMentionBypass?: boolean;
   /**
@@ -4465,6 +4468,7 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
         || entry.regularGroupMentionMode === 'ambient'
         ? entry.regularGroupMentionMode
         : undefined,
+      exclusiveTopicOwner: entry.exclusiveTopicOwner === true || undefined,
       soloGroupMentionBypass: entry.soloGroupMentionBypass === false ? false : undefined,
       substituteMode,
       // 文档订阅默认触发范围。只 'all' 有意义；'mention-only'（默认）归一化为

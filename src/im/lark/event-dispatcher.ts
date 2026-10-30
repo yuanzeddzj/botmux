@@ -19,6 +19,8 @@ import { logger } from '../../utils/logger.js';
 import { upsertBotInfoEntries } from '../../services/bots-info-store.js';
 import { BoundedMap } from '../../utils/bounded-map.js';
 import { serializeByAnchor } from '../../utils/anchor-serializer.js';
+import { createExclusiveTopicRuntime } from '../../core/exclusive-topic-runtime.js';
+import type { ExclusiveTopics, ExclusiveTopicInput } from '../../services/exclusive-topic-owner.js';
 import { parseSlashCommandInvocation, resolvePassthroughCommands } from '../../core/command-handler.js';
 import { commandSpec, isBuiltinMentionlessInvocation } from '../../core/command-schema.js';
 import { isTopicHeader, parseTopicHeader } from '../../core/topic-header.js';
@@ -2724,6 +2726,8 @@ export async function checkGroupMessageAccess(
  *  daemon never has to re-derive it. */
 export interface RoutingContext {
   chatId: string;
+  /** Shared group-topic ownership, independent of each bot's session map. */
+  exclusiveTopic?: { rootId: string; selectedAppId?: string };
   /** message_id of the inbound message that triggered this routing. */
   messageId: string;
   chatType: 'group' | 'p2p';
@@ -4790,6 +4794,8 @@ export interface LarkEventDispatcherRuntime {
 }
 
 export interface LarkEventDispatcherRuntimeOptions {
+  /** Shared topic responder/execution coordinator; injectable for transport tests. */
+  exclusiveTopics?: ExclusiveTopics;
   /** Realtime event ingress. In primary multi-replica mode every connected
    * Lark SDK client must be allowed to persist the event selected for it. */
   enqueuePrimary?: (input: {
@@ -4883,8 +4889,63 @@ export function createLarkEventDispatcherRuntime(
     // so a follow-up never races the seed's in-flight session spawn (PR #597
     // durable turn ownership/ordering). The shared helper's other caller (polled
     // message-listener) keeps serializeByAnchor's default cap.
+    const exclusive = payload.ctx.exclusiveTopic;
+    if (exclusive) {
+      await exclusiveTopics().admit(exclusiveInput(payload.data, exclusive), () =>
+        dispatchHumanMessageViaHandlers(larkAppId, handlers, payload, 0));
+      return;
+    }
     await dispatchHumanMessageViaHandlers(larkAppId, handlers, payload, 0);
   };
+  let topicCoordinator = runtimeOptions.exclusiveTopics;
+  const exclusiveTopics = (): ExclusiveTopics => {
+    topicCoordinator ??= createExclusiveTopicRuntime({
+      async inferOwner(input) {
+        const { listThreadMessagesWithContext, resolveCurrentChatBotOpenIdsByLarkAppIds, resolveTargetAppOpenId } = await import('./client.js');
+        const history = await listThreadMessagesWithContext(larkAppId, input.chatId, input.rootId, 100);
+        if (!history.verifiedThread) return undefined;
+        const bots = getAllBots().filter(bot => bot.config.exclusiveTopicOwner === true);
+        const mappings = (await Promise.all(bots.map(bot =>
+          resolveCurrentChatBotOpenIdsByLarkAppIds(larkAppId, input.chatId, [bot.config.larkAppId]))))
+          .flatMap(result => result.ok ? result.mappings : []);
+        for (const message of [...history.messages].sort((a, b) => Number(b.create_time) - Number(a.create_time))) {
+          if (message.sender?.sender_type !== 'user') continue;
+          const targets = mappings.filter(bot => messageMentionsBot(message, bot.larkAppId, bot.subjectOpenId));
+          if (targets.length !== 1) continue;
+          const selectedAt = Number(message.create_time);
+          if (!Number.isSafeInteger(selectedAt) || !message.message_id) continue;
+          const targetAppId = targets[0]!.larkAppId;
+          const senderId = message.sender?.id;
+          if (typeof senderId !== 'string') continue;
+          let targetSenderId = targetAppId === larkAppId ? senderId : undefined;
+          let senderUnionId: string | undefined;
+          if (!targetSenderId || !canTalk(targetAppId, input.chatId, targetSenderId, undefined, undefined, 'group')) {
+            const union = await resolveUnionIdFromOpenIdStrict(larkAppId, senderId);
+            if (union.status !== 'resolved') continue;
+            senderUnionId = union.unionId;
+            if (!targetSenderId) {
+              const identity = await resolveTargetAppOpenId(targetAppId, senderUnionId);
+              if (identity.status !== 'resolved') continue;
+              targetSenderId = identity.openId;
+            }
+          }
+          if (!canTalk(targetAppId, input.chatId, targetSenderId, undefined, senderUnionId, 'group')) continue;
+          return { ownerAppId: targetAppId, selectedAt, selectionMessageId: message.message_id };
+        }
+        return undefined;
+      },
+    });
+    return topicCoordinator;
+  };
+  const exclusiveInput = (data: any, topic: { rootId: string; selectedAppId?: string }): ExclusiveTopicInput => ({
+    chatId: data.message.chat_id,
+    rootId: topic.rootId,
+    larkAppId,
+    messageId: data.message.message_id,
+    createdAt: Math.max(Number(data.message.create_time) || 0, Number(data.message.update_time) || 0) || Date.now(),
+    selectedAppId: topic.selectedAppId,
+    threadId: data.message.thread_id,
+  });
   const dispatchPersistedForwardFollowup = async (
     seedMessageId: string,
     payload: PendingForwardTopicPayload,
@@ -5570,7 +5631,33 @@ export function createLarkEventDispatcherRuntime(
         replyRootId = message.root_id;
       }
       const explicitlyMentionedThisBot = isBotMentioned(larkAppId, message, senderOpenId);
-      const messageListener = chatType === 'group'
+      let exclusiveTopic: { rootId: string; selectedAppId?: string } | undefined;
+      if (chatType === 'group' && sender?.sender_type === 'user'
+        && getBot(larkAppId).config.exclusiveTopicOwner === true && isAllowed) {
+        const hasOtherMention = mentionsAnotherMember(larkAppId, message);
+        if (!explicitlyMentionedThisBot && hasOtherMention) return;
+        if (explicitlyMentionedThisBot || (message.root_id && message.thread_id)) {
+          if (explicitlyMentionedThisBot && hasOtherMention) {
+            const configuredTargets = getAllBots().filter(bot =>
+              messageMentionsBot(message, bot.config.larkAppId, bot.botOpenId));
+            if (configuredTargets.length > 1) return;
+            const { listChatBotMembers } = await import('./client.js');
+            const members = await listChatBotMembers(larkAppId, chatId);
+            if (members.length === 0) return; // unknown target kind is not a unique bot
+            const targets = members.filter(member => messageMentionsBot(message, '', member.openId));
+            if (targets.length > 1) return;
+          }
+          exclusiveTopic = { rootId: message.root_id ?? messageId,
+            ...(explicitlyMentionedThisBot ? { selectedAppId: larkAppId } : {}) };
+          const owner = exclusiveTopics().currentOwner(chatId, exclusiveTopic.rootId);
+          if (!explicitlyMentionedThisBot && owner && owner !== larkAppId) return;
+          if (explicitlyMentionedThisBot) await exclusiveTopics().select?.(exclusiveInput(data, exclusiveTopic));
+          routing.scope = 'thread';
+          routing.anchor = exclusiveTopic.rootId;
+          routingSource = message.root_id ? 'real-thread' : 'regular-group-thread';
+        }
+      }
+      const messageListener = chatType === 'group' && !exclusiveTopic
         ? await evaluateMessageListenerWithDocumentTitles({
             bot: getBot(larkAppId),
             chatId,
@@ -5684,6 +5771,7 @@ export function createLarkEventDispatcherRuntime(
       // 'never' stays unconditional by design.
       const mentionModeForAlias = resolveGroupMentionMode(larkAppId, chatId);
       if (!explicitlyMentionedThisBot
+          && !exclusiveTopic
           && mentionModeForAlias !== 'always'
           && !((mentionModeForAlias === 'topic' || mentionModeForAlias === 'ambient') && mentionsAnotherMember(larkAppId, message))
           && routing.scope === 'thread' && message.root_id && message.thread_id && chatType === 'group') {
@@ -5754,7 +5842,7 @@ export function createLarkEventDispatcherRuntime(
       const ownsThreadSessionBeforeFold = routing.scope === 'thread'
         ? (handlers.isSessionOwner?.(routing.anchor, larkAppId) ?? false)
         : false;
-      const foldedReplyRootId = await maybeFoldMentionedRegularGroupThreadToChat({
+      const foldedReplyRootId = exclusiveTopic ? undefined : await maybeFoldMentionedRegularGroupThreadToChat({
         larkAppId, chatId, chatType, message, routing, forceTopicApplied, mentionedThisBot: explicitlyMentionedThisBot, ownsThreadSession: ownsThreadSessionBeforeFold,
         answeredRootAtTopLevel: root => handlers.chatSessionAnsweredRootAtTopLevel?.(root, chatId, larkAppId) ?? false,
       });
@@ -5762,7 +5850,7 @@ export function createLarkEventDispatcherRuntime(
         replyRootId = foldedReplyRootId;
         ownsSession = handlers.isSessionOwner?.(routing.anchor, larkAppId) ?? false;
       } else {
-        const seedReplyRootId = await maybeApplySharedTopicSeed({
+        const seedReplyRootId = exclusiveTopic ? undefined : await maybeApplySharedTopicSeed({
           larkAppId, chatId, chatType, message, senderOpenId, messageId, routing, forceTopicApplied,
         });
         if (seedReplyRootId) {
@@ -6008,7 +6096,8 @@ export function createLarkEventDispatcherRuntime(
         // revalidateSolo 重查过人数——「刚拉新 bot、缓存仍是陈旧 {1,1}」会查出多 bot
         // 而不放行；重查后仍是 1人1bot,说明被 @ 的人不在群里（飞书允许 @ 群外的人）,
         // 唯一能接话的就是本 bot,照常放行。
-        const relax = (!!replyRootId && isAllowed)
+        const relax = (!!exclusiveTopic && isAllowed)
+          || (!!replyRootId && isAllowed)
           || (!!substituteTrigger && isAllowed)
           || !!messageListener
           || (isAllowed && mentionMode === 'never')
@@ -6106,12 +6195,14 @@ export function createLarkEventDispatcherRuntime(
           `chat=${chatId.substring(0, 12)} kind=${summaryCommandMatch.chatKind}`,
         );
       }
+      if (exclusiveTopic && (routing.scope !== 'thread' || routing.anchor !== exclusiveTopic.rootId)) return;
       const ctx: RoutingContext = {
         chatId,
         messageId,
         chatType,
         larkAppId,
         ...routing,
+        exclusiveTopic,
         regularGroupTopLevel: routingSource === 'regular-group-chat' || routingSource === 'regular-group-thread',
         replyRootId,
         promptOverride,

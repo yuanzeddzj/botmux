@@ -4,6 +4,9 @@ import { boardErrorStatus, type BoardCliRequest, type DecisionBoardService } fro
 import type { CodexCleanupReleaseTicket } from '../services/codex-cleanup-release.js';
 import { readTurnRegistration } from './trigger-registration.js';
 import { lookupTurnResultRequest } from './turn-result-routes.js';
+import { readTopicSelection, readTopicExecutionOwner, type TopicExecutionOwner } from '../services/exclusive-topic-owner.js';
+import { sessionMatchesExclusiveTopic } from './topic-ownership-revoke.js';
+import { suspendTopicWorkerVerified } from './worker-pool.js';
 import { normalizeCalendarBinding, normalizeCalendarDayType, listWorkCalendars, previewTaskCalendar } from '../services/work-calendar.js';
 import { resolveWorkspace } from './workspace-metadata.js';
 // src/core/dashboard-ipc-server.ts
@@ -2746,6 +2749,50 @@ ipcRoute('POST', '/api/sessions/:sessionId/wake', async (req, res, params) => {
  *  the same semantics the idle-worker sweeper applies over the live cap.
  *  Primary use: `botmux suspend --isolated` after a credential rotation, so
  *  isolated bots' next cold spawn re-provisions the freshest creds. */
+ipcRoute('POST', '/api/topic-ownership/revoke', async (req, res) => {
+  if (!isTrustedHostIpcRequest(req) && !ipcHmacAuthorized(req)) {
+    return jsonRes(res, 401, { ok: false, error: 'unauthorized' });
+  }
+  const body = await readJsonBody<TopicExecutionOwner>(req, 4_096);
+  if (!body || typeof body.chatId !== 'string' || !/^oc_[\w-]+$/.test(body.chatId)
+    || typeof body.rootId !== 'string' || !/^om_[\w-]+$/.test(body.rootId)
+    || typeof body.ownerAppId !== 'string' || !Number.isSafeInteger(body.epoch)
+    || body.epoch < 1 || body.phase !== 'handoff') {
+    return jsonRes(res, 400, { ok: false, error: 'invalid_topic_handoff' });
+  }
+  const current = () => {
+    const selection = readTopicSelection(config.session.dataDir, body);
+    const execution = readTopicExecutionOwner(config.session.dataDir, body);
+    return selection?.ownerAppId === body.ownerAppId && selection.epoch === body.epoch
+      && execution?.ownerAppId === body.ownerAppId && execution.epoch === body.epoch
+      && execution.phase === 'handoff';
+  };
+  if (!current()) return jsonRes(res, 409, { ok: false, error: 'stale_topic_handoff' });
+  if (!cachedLarkAppId) return jsonRes(res, 503, { ok: false, error: 'daemon_identity_unavailable' });
+  try {
+    const mutation = await tryWithBotTurnMutation(cachedLarkAppId, 10_000, async () => {
+      if (!current()) return false;
+      // Read only after draining in-flight preparations. A session created
+      // while acquiring the mutation lease must be included in retirement.
+      const peers = listActiveSessions().filter(ds => ds.larkAppId === cachedLarkAppId
+        && sessionMatchesExclusiveTopic(ds.session, body)
+        && (ds.larkAppId !== body.ownerAppId || ds.session.exclusiveTopicOwnerEpoch !== body.epoch));
+      for (const ds of peers) {
+        if (!current()) return false;
+        if (!await suspendTopicWorkerVerified(ds)) throw new Error('topic_worker_teardown_unverified');
+      }
+      return current();
+    });
+    if (!mutation.acquired || !mutation.value) {
+      return jsonRes(res, 409, { ok: false, error: 'topic_handoff_not_acquired' });
+    }
+  } catch (error) {
+    logger.warn(`[topic-owner] retirement failed: ${String(error)}`);
+    return jsonRes(res, 409, { ok: false, error: 'topic_worker_teardown_unverified' });
+  }
+  jsonRes(res, 200, { ok: true });
+});
+
 ipcRoute('POST', '/api/sessions/:sessionId/suspend', async (_req, res, params) => {
   const initial = findActiveBySessionId(params.sessionId);
   if (!initial) return jsonRes(res, 404, { ok: false, error: 'session_not_active' });

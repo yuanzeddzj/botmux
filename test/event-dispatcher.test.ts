@@ -923,6 +923,7 @@ function setupBotState(opts?: {
   regularGroupReplyMode?: 'chat' | 'new-topic' | 'shared' | 'chat-topic';
   signedChatDefaults?: boolean;
   soloGroupMentionBypass?: boolean;
+  exclusiveTopicOwner?: boolean;
   chatSoloGroupMentionBypass?: Record<string, boolean>;
 	  regularGroupMentionMode?: 'always' | 'topic' | 'never' | 'ambient';
 	  autoStartOnNewTopic?: boolean;
@@ -964,6 +965,7 @@ function setupBotState(opts?: {
       regularGroupReplyMode: opts?.regularGroupReplyMode,
       signedChatDefaults: opts?.signedChatDefaults,
       soloGroupMentionBypass: opts?.soloGroupMentionBypass,
+      exclusiveTopicOwner: opts?.exclusiveTopicOwner,
       chatSoloGroupMentionBypass: opts?.chatSoloGroupMentionBypass,
       regularGroupMentionMode: opts?.regularGroupMentionMode,
       autoStartOnNewTopic: opts?.autoStartOnNewTopic,
@@ -14338,5 +14340,91 @@ describe('im.message.receive_v1 — /dash 内置免@ 控制命令', () => {
     expect(handlers.handleNewTopic).toHaveBeenCalledOnce();
     const ctx = handlers.handleNewTopic.mock.calls[0][1];
     expect(ctx.commandTrigger).toBeUndefined();
+  });
+});
+
+describe('exclusive topic owner routing', () => {
+  it('hands the topic to the newly mentioned bot and sends mentionless replies only to it', async () => {
+    __resetEventClaimsForTest();
+    __resetAnchorQueues();
+    const first = setupBotState({
+      allowedUsers: [USER_OPEN_ID],
+      regularGroupMentionMode: 'topic',
+      regularGroupReplyMode: 'new-topic',
+      exclusiveTopicOwner: true,
+    });
+    const second = {
+      ...first,
+      config: { ...first.config, larkAppId: OTHER_BOT_APP_ID },
+      botOpenId: OTHER_BOT_OPEN_ID,
+    };
+    const bots = new Map([[MY_APP_ID, first], [OTHER_BOT_APP_ID, second]]);
+    mockGetBot.mockImplementation((appId: string) => bots.get(appId));
+    mockGetAllBots.mockReturnValue([...bots.values()]);
+    mockGetChatMode.mockResolvedValue('topic');
+    mockResolveCurrentChatBotOpenIds.mockResolvedValue({
+      ok: true,
+      mappings: [
+        { larkAppId: MY_APP_ID, subjectOpenId: MY_OPEN_ID },
+        { larkAppId: OTHER_BOT_APP_ID, subjectOpenId: OTHER_BOT_OPEN_ID },
+      ],
+    });
+    const delivered: string[] = [];
+    const running = new Set<string>();
+    const ownedSessions = new Set<string>();
+    let maximumRunningBots = 0;
+    let owner: string | undefined;
+    const exclusiveTopics = {
+      currentOwner: () => owner,
+      async admit(input: { larkAppId: string; selectedAppId?: string }, action: () => Promise<void>) {
+        if (input.selectedAppId) {
+          if (owner && owner !== input.selectedAppId) running.delete(owner);
+          owner = input.selectedAppId;
+        }
+        if (owner !== input.larkAppId) return false;
+        await action();
+        return true;
+      },
+    };
+    const options = { primaryRecoverySettleMs: 0, exclusiveTopics };
+    const makeTopicHandlers = (appId: string) => {
+      const handlers = makeHandlers();
+      handlers.isSessionOwner.mockImplementation(() => ownedSessions.has(appId));
+      const accept = async () => {
+        delivered.push(appId);
+        ownedSessions.add(appId);
+        running.add(appId);
+        maximumRunningBots = Math.max(maximumRunningBots, running.size);
+      };
+      handlers.handleNewTopic.mockImplementation(accept);
+      handlers.handleThreadReply.mockImplementation(accept);
+      return handlers;
+    };
+    createLarkEventDispatcherRuntime(MY_APP_ID, 'secret', makeTopicHandlers(MY_APP_ID), 'feishu', undefined, options).connect();
+    const receiveFirst = capturedHandlers['im.message.receive_v1'];
+    createLarkEventDispatcherRuntime(OTHER_BOT_APP_ID, 'secret', makeTopicHandlers(OTHER_BOT_APP_ID), 'feishu', undefined, options).connect();
+    const receiveSecond = capturedHandlers['im.message.receive_v1'];
+    const deliver = async (messageId: string, target?: string) => {
+      const event = makeUserMessageEvent({
+        senderOpenId: USER_OPEN_ID,
+        content: JSON.stringify({ text: target ? '请接手' : '继续处理' }),
+        messageId,
+        rootId: 'om_exclusive_root',
+        chatId: 'oc_exclusive_chat',
+        mentions: target ? [{ key: '@_target', name: 'Target', id: { open_id: target } }] : [],
+      });
+      receiveFirst(event);
+      receiveSecond(event);
+      for (let tick = 0; tick < 4; tick++) await flushEventWork();
+    };
+    await deliver('om_exclusive_first', MY_OPEN_ID);
+    await vi.waitFor(() => expect(delivered).toEqual([MY_APP_ID]));
+    await deliver('om_exclusive_handoff', OTHER_BOT_OPEN_ID);
+    await vi.waitFor(() => expect(delivered).toHaveLength(2));
+    await deliver('om_exclusive_followup');
+    await vi.waitFor(() => expect(delivered.length).toBeGreaterThanOrEqual(3));
+    expect(delivered).toEqual([MY_APP_ID, OTHER_BOT_APP_ID, OTHER_BOT_APP_ID]);
+    expect(maximumRunningBots).toBe(1);
+    expect([...running]).toEqual([OTHER_BOT_APP_ID]);
   });
 });
