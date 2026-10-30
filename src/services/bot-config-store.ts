@@ -116,6 +116,8 @@ export interface ConfigFieldSpec {
  * 在此登记但走 {@link setBotAllowedUsers} 的专用异步路径（重解析 + 防自锁）。
  */
 export const CONFIG_FIELDS: readonly ConfigFieldSpec[] = [
+  { key: 'groupMentionRequired', configKey: 'groupMentionRequired', kind: 'boolean', effect: 'immediate', clearable: false, hint: '群消息必须明确 @ 本 bot（默认 off）；on 时仅 mentionlessThreadChats 中的已有话题可免 @，一对一私聊保持免 @；话题归属和权限继续校验' },
+  { key: 'mentionlessThreadChats', configKey: 'mentionlessThreadChats', kind: 'stringList', effect: 'immediate', clearable: true, parseList: raw => [...new Set(raw.split(/[\s,，]+/).filter(Boolean))], hint: '群消息强制 @ 的已有话题例外：精确 chat_id 列表（逗号/空格分隔）；仅话题内生效，群顶层仍须 @；unset 清空例外，不解除 groupMentionRequired' },
   { key: 'displayName', configKey: 'displayName', kind: 'string', effect: 'immediate', clearable: true, maxLen: 64, hint: '自定义展示名（dashboard 名册/会话列表用，≤64 字符）；不改飞书群内应用名；unset 回飞书名称' },
   { key: 'model', configKey: 'model', kind: 'string', effect: 'next-session', clearable: true, hint: 'CLI 模型名（如 opus）；unset 回 CLI 默认' },
   { key: 'codexRpcInput', configKey: 'codexRpcInput', kind: 'boolean', effect: 'next-session', clearable: true, hint: 'Codex/TraeX RPC 输入 on|off；off 显式使用终端输入，unset 跟随全局；Auto 启用时自动使用终端输入' },

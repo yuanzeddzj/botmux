@@ -225,6 +225,37 @@ afterEach(async () => {
 });
 
 describe('dashboard IPC server', () => {
+  it('reads and hot-updates the required group mention boundary without changing DM behavior', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'group-mention-ipc-'));
+    const configPath = join(dir, 'bots.json');
+    const previous = process.env.BOTS_CONFIG;
+    try {
+      process.env.BOTS_CONFIG = configPath;
+      writeFileSync(configPath, JSON.stringify([{ larkAppId: 'cli_mention_test', larkAppSecret: 'fixture', exclusiveTopicOwner: true }]));
+      loadBotConfigs().forEach(registerBot); setLarkAppId('cli_mention_test'); setIpcAuthSecret(TEST_IPC_SECRET);
+      handle = await startIpcServer({ port: 0, host: '127.0.0.1', authRequired: true });
+      const base = `http://127.0.0.1:${handle.port}`;
+      const put = async (path: string, body: object) => fetch(base + path, { method: 'PUT',
+        headers: { ...trustedHostHeaders('PUT', path, handle!.port), 'content-type': 'application/json' }, body: JSON.stringify(body) });
+      expect((await put('/api/bot-group-mention-required', { groupMentionRequired: true })).status).toBe(200);
+      expect((await put('/api/bot-mentionless-thread-chats', { mentionlessThreadChats: 'oc_spring oc_spring' })).status).toBe(200);
+      const path = '/api/bot-group-mention-policy';
+      expect((await fetch(base + path)).status).toBe(401);
+      const read = await fetch(base + path, { headers: trustedHostHeaders('GET', path, handle.port) });
+      expect(await read.json()).toEqual({ ok: true, groupMentionRequired: true, mentionlessThreadChats: ['oc_spring'] });
+      const saved = JSON.parse(readFileSync(configPath, 'utf8'))[0];
+      expect(saved).toMatchObject({ groupMentionRequired: true, mentionlessThreadChats: ['oc_spring'], exclusiveTopicOwner: true });
+      expect(saved.p2pMode).toBeUndefined();
+      expect((await put('/api/bot-group-mention-required', { groupMentionRequired: 'off' })).status).toBe(400);
+      expect((await put('/api/bot-mentionless-thread-chats', { mentionlessThreadChats: '' })).status).toBe(200);
+      expect(getBot('cli_mention_test').config.groupMentionRequired).toBe(true);
+      expect(getBot('cli_mention_test').config.mentionlessThreadChats).toBeUndefined();
+    } finally {
+      if (previous === undefined) delete process.env.BOTS_CONFIG; else process.env.BOTS_CONFIG = previous;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('turn result reads require host HMAC and exact bot, turn and attempt', async () => {
     const appId = 'app_result_ipc';
     registerBot({ larkAppId: appId, larkAppSecret: 'fixture', turnResults: { enabled: true } });

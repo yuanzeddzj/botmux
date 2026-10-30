@@ -3429,6 +3429,21 @@ function isMessageTriggerClaimed(larkAppId: string, messageId: string): boolean 
     || pendingMessageTriggers.has(messageTriggerKey(larkAppId, messageId));
 }
 
+
+/** A configured hard boundary for message triggers, evaluated before every
+ * mentionless shortcut and again when delayed/polled messages dispatch.
+ * Native root+thread provenance excludes top-level quoted messages and seeds. */
+function groupMentionPolicyBlocks(larkAppId: string, message: any, chatType: 'group' | 'p2p'): boolean {
+  const cfg = getBot(larkAppId).config;
+  if (chatType === 'p2p' || cfg.groupMentionRequired !== true
+    || isBotMentioned(larkAppId, message, undefined)) return false;
+  const inAllowedThread = cfg.mentionlessThreadChats?.includes(message?.chat_id)
+    && typeof message?.root_id === 'string' && !!message.root_id
+    && typeof message?.thread_id === 'string' && !!message.thread_id
+    && message.root_id !== message.message_id;
+  return !inAllowedThread;
+}
+
 async function dispatchHumanMessageViaHandlers(
   larkAppId: string,
   handlers: EventHandlers,
@@ -3436,6 +3451,7 @@ async function dispatchHumanMessageViaHandlers(
   capMs?: number,
 ): Promise<void> {
   const appId = payload.ctx.larkAppId ?? larkAppId;
+  if (groupMentionPolicyBlocks(appId, payload.data.message, payload.ctx.chatType === 'p2p' ? 'p2p' : 'group')) return;
   const messageId = payload.ctx.messageId;
   if (messageId && isMessageTriggerClaimed(appId, messageId)) {
     logger.debug(`[message-trigger:${appId}] duplicate dispatch ignored msg=${messageId.substring(0, 12)}`);
@@ -3453,6 +3469,9 @@ async function dispatchHumanMessageViaHandlers(
       return;
     }
     await serializeByAnchor(payload.ctx.anchor, () => {
+      // Configuration can change while this message waits behind an earlier
+      // turn's admission; recheck before invoking the actual input handler.
+      if (groupMentionPolicyBlocks(appId, payload.data.message, payload.ctx.chatType === 'p2p' ? 'p2p' : 'group')) return Promise.resolve();
       const ownsSession = handlers.isSessionOwner?.(payload.ctx.anchor, larkAppId) ?? payload.ownsSession;
       return ownsSession
         ? handlers.handleThreadReply(payload.data, payload.ctx)
@@ -5173,6 +5192,12 @@ export function createLarkEventDispatcherRuntime(
       // 这里不再二次处理，避免用回落猜测的 chat_type 把查不到群类型的编辑也收进去。
       if (chatType === 'group' && !data.__groupContextHandled) ingestGroupContextEvent(larkAppId, data);
 
+      // Recording context is observational. Only the input trigger is gated;
+      // daemon-owned self echoes retain their internal /close lifecycle path.
+      const selfEcho = !!getBot(larkAppId).botOpenId && (sender?.sender_type === 'app' || sender?.sender_type === 'bot')
+        && (sender?.sender_id?.open_id ?? sender?.sender_id?.app_id) === getBot(larkAppId).botOpenId;
+      if (!selfEcho && groupMentionPolicyBlocks(larkAppId, message, chatType)) return;
+
       // Bot-originated messages — bots historically only post inside threads
       // (their own thread replies). With chat-scope sessions a bot can also
       // post top-level (its first reply in a chat-scope group), so we still
@@ -5800,6 +5825,7 @@ export function createLarkEventDispatcherRuntime(
       // gets the explicit topic seed it asked for.
       if (
         !messageListener &&
+        !exclusiveTopic &&
         routing.scope === 'thread' &&
         routing.anchor === messageId &&
         !message.thread_id &&
@@ -6094,7 +6120,11 @@ export function createLarkEventDispatcherRuntime(
         // revalidateSolo 重查过人数——「刚拉新 bot、缓存仍是陈旧 {1,1}」会查出多 bot
         // 而不放行；重查后仍是 1人1bot,说明被 @ 的人不在群里（飞书允许 @ 群外的人）,
         // 唯一能接话的就是本 bot,照常放行。
-        const relax = (!!exclusiveTopic && isAllowed)
+        const allowedMentionlessOwnedThread = getBot(larkAppId).config.groupMentionRequired === true
+          && !groupMentionPolicyBlocks(larkAppId, message, chatType)
+          && !!message.root_id && !!message.thread_id && ownsSession && !mentionsOther;
+        const relax = (allowedMentionlessOwnedThread && isAllowed)
+          || (!!exclusiveTopic && isAllowed)
           || (!!replyRootId && isAllowed)
           || (!!substituteTrigger && isAllowed)
           || !!messageListener

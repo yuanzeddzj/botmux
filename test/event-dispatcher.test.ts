@@ -924,6 +924,8 @@ function setupBotState(opts?: {
   signedChatDefaults?: boolean;
   soloGroupMentionBypass?: boolean;
   exclusiveTopicOwner?: boolean;
+  groupMentionRequired?: boolean;
+  mentionlessThreadChats?: string[];
   chatSoloGroupMentionBypass?: Record<string, boolean>;
 	  regularGroupMentionMode?: 'always' | 'topic' | 'never' | 'ambient';
 	  autoStartOnNewTopic?: boolean;
@@ -966,6 +968,8 @@ function setupBotState(opts?: {
       signedChatDefaults: opts?.signedChatDefaults,
       soloGroupMentionBypass: opts?.soloGroupMentionBypass,
       exclusiveTopicOwner: opts?.exclusiveTopicOwner,
+      groupMentionRequired: opts?.groupMentionRequired,
+      mentionlessThreadChats: opts?.mentionlessThreadChats,
       chatSoloGroupMentionBypass: opts?.chatSoloGroupMentionBypass,
       regularGroupMentionMode: opts?.regularGroupMentionMode,
       autoStartOnNewTopic: opts?.autoStartOnNewTopic,
@@ -14343,6 +14347,99 @@ describe('im.message.receive_v1 — /dash 内置免@ 控制命令', () => {
   });
 });
 
+describe('restricted group mention routing', () => {
+  const allowedChat = 'oc_allowed_thread_chat';
+  const otherChat = 'oc_other_chat';
+  const root = 'om_owned_root';
+
+  async function route(options: { chatId?: string; rootId?: string; threadId?: string | null;
+    chatType?: string; target?: string; text?: string; senderType?: string; owner?: string; permission?: boolean;
+    legacy?: boolean; useListener?: boolean }) {
+    __resetEventClaimsForTest(); __resetAnchorQueues();
+    const bot = setupBotState({ allowedUsers: [USER_OPEN_ID], exclusiveTopicOwner: true,
+      groupMentionRequired: !options.legacy, mentionlessThreadChats: [allowedChat],
+      regularGroupMentionMode: 'never', soloGroupMentionBypass: true, autoStartOnNewTopic: true,
+      messageListeners: options.useListener ? { [otherChat]: { enabled: true, source: { type: 'text' }, replyMode: 'thread' } } : undefined });
+    mockGetBot.mockReturnValue(bot);
+    mockGetAllBots.mockReturnValue([bot]);
+    mockGetChatMode.mockResolvedValue('group');
+    mockGetCachedChatMode.mockReturnValue('group');
+    const handlers = makeHandlers(); handlers.isSessionOwner.mockReturnValue(true);
+    let owner = options.owner ?? MY_APP_ID;
+    const exclusiveTopics = {
+      currentOwner: () => owner,
+      async admit(input: { larkAppId: string; selectedAppId?: string }, action: () => Promise<void>) {
+        if (input.selectedAppId) owner = input.selectedAppId;
+        if (owner !== input.larkAppId) return false;
+        await action(); return true;
+      },
+    };
+    createLarkEventDispatcherRuntime(MY_APP_ID, 'secret', handlers, 'feishu', undefined,
+      { primaryRecoverySettleMs: 0, exclusiveTopics }).connect();
+    const event = makeUserMessageEvent({ senderOpenId: options.permission === false ? 'ou_not_allowed' : USER_OPEN_ID,
+      chatId: options.chatId ?? allowedChat, chatType: options.chatType ?? 'group', rootId: options.rootId,
+      threadId: options.threadId, messageId: 'om_scoped_input', content: JSON.stringify({ text: options.target ? '@_target ' + (options.text ?? 'continue') : options.text ?? 'continue' }),
+      mentions: options.target ? [{ key: '@_target', name: 'Target', id: { open_id: options.target } }] : [] });
+    if (options.senderType) (event.sender as any).sender_type = options.senderType;
+    await capturedHandlers['im.message.receive_v1'](event);
+    for (let tick = 0; tick < 4; tick++) await flushEventWork();
+    return handlers;
+  }
+
+  it.each([
+    { label: 'allowed group top level', chatId: allowedChat },
+    { label: 'other group top level', chatId: otherChat },
+    { label: 'other group owned thread', chatId: otherChat, rootId: root },
+    { label: 'quoted root without native thread', chatId: allowedChat, rootId: root, threadId: null },
+    { label: 'bare status command', chatId: otherChat, text: '/status' },
+    { label: 'listener shortcut', chatId: otherChat, rootId: root, useListener: true },
+    { label: 'bot listener shortcut', chatId: otherChat, rootId: root, useListener: true, senderType: 'app' },
+  ])('requires a direct bot mention for $label despite existing relaxed settings', async scenario => {
+    const h = await route(scenario);
+    expect(h.handleNewTopic).not.toHaveBeenCalled(); expect(h.handleThreadReply).not.toHaveBeenCalled();
+  });
+
+  it('requires a direct mention for @all outside the allowlisted thread', async () => {
+    const h = await route({ chatId: otherChat, rootId: root, target: 'all' });
+    expect(h.handleThreadReply).not.toHaveBeenCalled(); expect(h.handleNewTopic).not.toHaveBeenCalled();
+  });
+
+  it('continues the allowed group owned thread without @', async () => {
+    const h = await route({ rootId: root });
+    expect(h.handleThreadReply).toHaveBeenCalledOnce(); expect(h.handleNewTopic).not.toHaveBeenCalled();
+  });
+
+  it.each(['p2p'])('keeps the %s one-to-one conversation mentionless', async chatType => {
+    const h = await route({ chatId: 'oc_direct_chat', chatType });
+    expect(h.handleThreadReply.mock.calls.length + h.handleNewTopic.mock.calls.length).toBe(1);
+  });
+
+  it.each([allowedChat, otherChat])('accepts an explicit @ in %s', async chatId => {
+    const h = await route({ chatId, target: MY_OPEN_ID });
+    await vi.waitFor(() => expect(h.handleThreadReply.mock.calls.length + h.handleNewTopic.mock.calls.length).toBe(1), {timeout:4000});
+  });
+
+  it('keeps the allowed thread silent for a different owner', async () => {
+    const h = await route({ rootId: root, owner: OTHER_BOT_APP_ID });
+    expect(h.handleThreadReply).not.toHaveBeenCalled(); expect(h.handleNewTopic).not.toHaveBeenCalled();
+  });
+
+  it('does not turn the allowlisted group into a permission grant', async () => {
+    const h = await route({ rootId: root, permission: false });
+    expect(h.handleThreadReply).not.toHaveBeenCalled(); expect(h.handleNewTopic).not.toHaveBeenCalled();
+  });
+
+  it('backs off when a message in the allowed thread addresses another bot', async () => {
+    const h = await route({ rootId: root, target: OTHER_BOT_OPEN_ID });
+    expect(h.handleThreadReply).not.toHaveBeenCalled(); expect(h.handleNewTopic).not.toHaveBeenCalled();
+  });
+
+  it('preserves the earlier routing behavior when the hard boundary is disabled', async () => {
+    const h = await route({ rootId: root, chatId: otherChat, legacy: true });
+    expect(h.handleThreadReply).toHaveBeenCalledOnce();
+  });
+});
+
 describe('exclusive topic owner routing', () => {
   it('hands the topic to the newly mentioned bot and sends mentionless replies only to it', async () => {
     __resetEventClaimsForTest();
@@ -14351,7 +14448,7 @@ describe('exclusive topic owner routing', () => {
       allowedUsers: [USER_OPEN_ID],
       regularGroupMentionMode: 'topic',
       regularGroupReplyMode: 'new-topic',
-      exclusiveTopicOwner: true,
+      exclusiveTopicOwner: true, groupMentionRequired: true, mentionlessThreadChats: ['oc_exclusive_chat'],
     });
     const second = {
       ...first,

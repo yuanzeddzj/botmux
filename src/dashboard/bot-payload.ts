@@ -230,6 +230,9 @@ export function botDefaultsPayload(bot: DashboardBotDescriptor, j?: any, error?:
     regularGroupReplyMode: (j?.regularGroupReplyMode === 'chat' || j?.regularGroupReplyMode === 'new-topic' || j?.regularGroupReplyMode === 'shared')
       ? j.regularGroupReplyMode
       : 'chat-topic',
+    groupMentionRequired: j?.groupMentionRequired === true,
+    mentionlessThreadChats: Array.isArray(j?.mentionlessThreadChats)
+      ? j.mentionlessThreadChats.filter((id: unknown): id is string => typeof id === 'string' && !!id.trim()).map((id: string) => id.trim()) : [],
     regularGroupMentionMode: (j?.regularGroupMentionMode === 'topic' || j?.regularGroupMentionMode === 'never' || j?.regularGroupMentionMode === 'ambient')
       ? j.regularGroupMentionMode
       : 'always',

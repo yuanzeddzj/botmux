@@ -8338,6 +8338,8 @@ ipcRoute('GET', '/api/bot-default-oncall', requireBoundBot(async (_req, res) => 
     groupJoinCommand: cardPrefs.groupJoinCommand,
     regularGroupReplyMode: cardPrefs.regularGroupReplyMode,
     regularGroupMentionMode: cardPrefs.regularGroupMentionMode,
+    groupMentionRequired: getBot(cachedLarkAppId).config.groupMentionRequired === true,
+    mentionlessThreadChats: getBot(cachedLarkAppId).config.mentionlessThreadChats ?? [],
     quotaFallbackBot: (() => {
       try { return getBot(cachedLarkAppId).config.quotaFallbackBot ?? null; }
       catch { return null; }
@@ -10654,6 +10656,23 @@ ipcRoute('POST', '/api/xpi/disable', async (_req, res) => {
   } catch (err: any) {
     jsonRes(res, 500, { ok: false, error: ipcErrorText(err) });
   }
+});
+
+// Per-bot group trigger policy. DMs remain mentionless; only the exact
+// allowlisted native threads are exceptions to required group mentions.
+ipcRoute('GET', '/api/bot-group-mention-policy', requireBoundBot((_req, res) => {
+  const cfg = getBot(cachedLarkAppId).config;
+  jsonRes(res, 200, { ok: true, groupMentionRequired: cfg.groupMentionRequired === true,
+    mentionlessThreadChats: cfg.mentionlessThreadChats ?? [] });
+}));
+botConfigPutRoute<{ groupMentionRequired?: unknown }>('/api/bot-group-mention-required', 'groupMentionRequired', {
+  normalize: body => typeof body.groupMentionRequired === 'boolean'
+    ? { ok: true, value: body.groupMentionRequired } : { ok: false, error: 'invalid_boolean' },
+  respond: value => ({ ok: true, groupMentionRequired: value === true }),
+});
+botConfigPutRoute<{ mentionlessThreadChats?: unknown }>('/api/bot-mentionless-thread-chats', 'mentionlessThreadChats', {
+  normalize: (body, spec) => optionalTextField(spec, body.mentionlessThreadChats),
+  respond: value => ({ ok: true, mentionlessThreadChats: value ?? [] }),
 });
 
 // Hot-reload the current daemon's per-bot config from bots.json after another

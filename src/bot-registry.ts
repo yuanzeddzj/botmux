@@ -2455,6 +2455,12 @@ export interface BotConfig {
   /** Persist one responder per group topic; explicit human @mentions hand it
    * to another bot only after the predecessor has stopped executing. */
   exclusiveTopicOwner?: boolean;
+  /** Require an explicit bot mention for group-message triggers. Existing
+   * threads in mentionlessThreadChats may continue without it; DMs are unchanged. */
+  groupMentionRequired?: boolean;
+  /** Exact group IDs where existing native threads may continue without @.
+   * This is not a grant; permissions and exclusive topic ownership still apply. */
+  mentionlessThreadChats?: string[];
   /** Allow the single-human/single-bot group exception to the @ policy (default true). */
   soloGroupMentionBypass?: boolean;
   /**
@@ -4469,6 +4475,9 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
         ? entry.regularGroupMentionMode
         : undefined,
       exclusiveTopicOwner: entry.exclusiveTopicOwner === true || undefined,
+      groupMentionRequired: entry.groupMentionRequired === true || undefined,
+      mentionlessThreadChats: entry.mentionlessThreadChats === undefined
+        ? undefined : [...new Set(normalizeStringList(entry.mentionlessThreadChats))],
       soloGroupMentionBypass: entry.soloGroupMentionBypass === false ? false : undefined,
       substituteMode,
       // 文档订阅默认触发范围。只 'all' 有意义；'mention-only'（默认）归一化为

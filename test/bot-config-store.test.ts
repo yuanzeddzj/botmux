@@ -86,6 +86,21 @@ describe('bot-config store', () => {
     return { registry, store, pinStreamingCardChange };
   }
 
+  it('persists the group mention boundary and exact thread exception IDs without reopening groups when cleared', async () => {
+    const { registry, store } = await loaded({ exclusiveTopicOwner: true });
+    const required = store.findConfigField('groupMentionRequired')!;
+    const chats = store.findConfigField('mentionlessThreadChats')!;
+    const value = store.coerceConfigValue(chats, 'oc_spring, oc_other oc_spring');
+    expect(value).toEqual({ ok: true, value: ['oc_spring', 'oc_other'] });
+    expect((await store.applyConfigField('app_default', required, true)).ok).toBe(true);
+    expect((await store.applyConfigField('app_default', chats, ['oc_spring', 'oc_other'])).ok).toBe(true);
+    expect(registry.loadBotConfigs()[0]).toMatchObject({ groupMentionRequired: true, mentionlessThreadChats: ['oc_spring', 'oc_other'] });
+    expect((await store.applyConfigField('app_default', chats, null)).ok).toBe(true);
+    expect(readConfig().groupMentionRequired).toBe(true);
+    expect(readConfig().mentionlessThreadChats).toBeUndefined();
+    expect(registry.getBot('app_default').config.groupMentionRequired).toBe(true);
+  });
+
   it('round-trips envPolicy through shared CLI coercion, file parsing, persistence and memory', async () => {
     const { registry, store } = await loaded({ envPolicy: { mode: 'strict', inherit: ['HTTPS_PROXY'] } });
     const spec = store.findConfigField('envPolicy')!;
