@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync, type ChildProcess } from 'node:child_process';
@@ -58,6 +58,7 @@ beforeEach(() => {
     larkAppId, cliId: 'claude-code', backendType: 'pty', exclusiveTopicOwner: true,
   } }));
   vi.spyOn(registry, 'getAllBots').mockReturnValue(bots as any);
+  vi.spyOn(registry, 'loadBotConfigs').mockReturnValue(bots.map(bot => bot.config) as any);
   vi.spyOn(registry, 'getBot').mockImplementation(app => bots.find(bot => bot.config.larkAppId === app) as any);
 });
 afterEach(async () => {
@@ -258,6 +259,21 @@ describe('exclusive owner adversarial execution probes', () => {
     expect(forkWorker(ds, 'late saved activation', true, { onAdmission })).toBe(false);
     expect(ds.worker).toBeNull();
     expect(sendWorkerInput(ds, 'late saved activation', 'om_attack_legacy')).toBe(false);
+    const selectedWorker = await workerProbe();
+    const selectedDs = session(selectedWorker.worker);
+    selectedDs.larkAppId = 'b';
+    selectedDs.session.exclusiveTopicOwnerEpoch = readTopicExecutionOwner(dataDir, topic)!.epoch;
+    const path = join(dataDir, 'topic-owners', readdirSync(join(dataDir, 'topic-owners')).find(name => name.endsWith('.execution.json'))!);
+    const legacy = JSON.parse(readFileSync(path, 'utf8'));
+    delete legacy.protocol;
+    writeFileSync(path, JSON.stringify(legacy));
+    const send = vi.spyOn(selectedWorker.worker, 'send');
+    expect(sendWorkerSessionInput(selectedDs, { type: 'set_display_mode', mode: 'compact' } as any),
+      'an old active record cannot authorize worker IPC before cross-process ownership is rechecked').toBe(false);
+    expect(send).not.toHaveBeenCalled();
+    await c.admit(event('b', 2, false), async () => {
+      expect(sendWorkerSessionInput(selectedDs, { type: 'set_display_mode', mode: 'compact' } as any)).toBe(true);
+    });
   });
 
   it('retires a legacy session created while real host IPC waits for its bot admission to drain', async () => {

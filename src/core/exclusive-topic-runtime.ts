@@ -1,5 +1,5 @@
 import { config } from '../config.js';
-import { getAllBots } from '../bot-registry.js';
+import { loadBotConfigs } from '../bot-registry.js';
 import { fetchDaemonIpc } from './daemon-ipc-auth.js';
 import { findOnlineDaemon } from '../utils/daemon-discovery.js';
 import { ExclusiveTopicCoordinator, type ExclusiveTopicInput } from '../services/exclusive-topic-owner.js';
@@ -15,9 +15,11 @@ export function createExclusiveTopicRuntime(options: {
     dataDir: config.session.dataDir,
     inferOwner: options.inferOwner,
     async revokeOtherBots(owner, isCurrent) {
-      for (const bot of getAllBots()) {
-        const appId = bot.config.larkAppId;
-        if (bot.config.exclusiveTopicOwner !== true) continue;
+      // A daemon registers only its own SDK client. Peer discovery must use
+      // the shared configuration, rather than its process-local bot registry.
+      for (const bot of loadBotConfigs()) {
+        const appId = bot.larkAppId;
+        if (bot.exclusiveTopicOwner !== true) continue;
         if (!isCurrent()) return;
         const peer = findOnlineDaemon(appId, config.session.dataDir);
         if (!peer) {

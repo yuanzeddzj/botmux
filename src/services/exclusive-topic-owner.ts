@@ -22,6 +22,7 @@ export interface TopicExecutionOwner extends TopicIdentity {
   ownerAppId: string;
   epoch: number;
   phase: 'handoff' | 'active';
+  protocol?: 'v2';
 }
 
 export interface ExclusiveTopicInput extends TopicIdentity {
@@ -175,8 +176,8 @@ export class ExclusiveTopicCoordinator implements ExclusiveTopics {
         };
         let owner = readTopicExecutionOwner(this.options.dataDir, input);
         if (!owner || owner.ownerAppId !== captured.ownerAppId
-          || owner.epoch !== captured.epoch || owner.phase !== 'active') {
-          owner = { chatId: input.chatId, rootId: input.rootId, ownerAppId: captured.ownerAppId, epoch: captured.epoch, phase: 'handoff' };
+          || owner.epoch !== captured.epoch || owner.phase !== 'active' || owner.protocol !== 'v2') {
+          owner = { chatId: input.chatId, rootId: input.rootId, ownerAppId: captured.ownerAppId, epoch: captured.epoch, phase: 'handoff', protocol: 'v2' };
           writeRecord(executionPath, owner);
           try {
             await this.options.revokeOtherBots(owner, isCurrent);
@@ -205,5 +206,6 @@ export function topicExecutionAllowed(dataDir: string, input: TopicIdentity & { 
     && owner?.ownerAppId === input.larkAppId
     && owner.epoch === selection.epoch
     && (input.epoch === undefined || owner.epoch === input.epoch)
+    && owner.protocol === 'v2'
     && owner.phase === 'active';
 }

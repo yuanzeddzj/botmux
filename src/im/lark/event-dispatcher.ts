@@ -4901,12 +4901,12 @@ export function createLarkEventDispatcherRuntime(
   const exclusiveTopics = (): ExclusiveTopics => {
     topicCoordinator ??= createExclusiveTopicRuntime({
       async inferOwner(input) {
-        const { listThreadMessagesWithContext, resolveCurrentChatBotOpenIdsByLarkAppIds, resolveTargetAppOpenId } = await import('./client.js');
+        const { listThreadMessagesWithContext, resolveCurrentChatBotOpenIdsByLarkAppIds } = await import('./client.js');
         const history = await listThreadMessagesWithContext(larkAppId, input.chatId, input.rootId, 100);
         if (!history.verifiedThread) return undefined;
-        const bots = getAllBots().filter(bot => bot.config.exclusiveTopicOwner === true);
+        const bots = loadBotConfigs().filter(bot => bot.exclusiveTopicOwner === true);
         const mappings = (await Promise.all(bots.map(bot =>
-          resolveCurrentChatBotOpenIdsByLarkAppIds(larkAppId, input.chatId, [bot.config.larkAppId]))))
+          resolveCurrentChatBotOpenIdsByLarkAppIds(larkAppId, input.chatId, [bot.larkAppId]))))
           .flatMap(result => result.ok ? result.mappings : []);
         for (const message of [...history.messages].sort((a, b) => Number(b.create_time) - Number(a.create_time))) {
           if (message.sender?.sender_type !== 'user') continue;
@@ -4915,19 +4915,17 @@ export function createLarkEventDispatcherRuntime(
           const selectedAt = Number(message.create_time);
           if (!Number.isSafeInteger(selectedAt) || !message.message_id) continue;
           const targetAppId = targets[0]!.larkAppId;
+          // Only the target's own daemon can check its app-scoped human
+          // permission. Other receivers yield without choosing an older @.
+          if (targetAppId !== larkAppId) return undefined;
           const senderId = message.sender?.id;
           if (typeof senderId !== 'string') continue;
-          let targetSenderId = targetAppId === larkAppId ? senderId : undefined;
+          const targetSenderId = senderId;
           let senderUnionId: string | undefined;
-          if (!targetSenderId || !canTalk(targetAppId, input.chatId, targetSenderId, undefined, undefined, 'group')) {
+          if (!canTalk(targetAppId, input.chatId, targetSenderId, undefined, undefined, 'group')) {
             const union = await resolveUnionIdFromOpenIdStrict(larkAppId, senderId);
             if (union.status !== 'resolved') continue;
             senderUnionId = union.unionId;
-            if (!targetSenderId) {
-              const identity = await resolveTargetAppOpenId(targetAppId, senderUnionId);
-              if (identity.status !== 'resolved') continue;
-              targetSenderId = identity.openId;
-            }
           }
           if (!canTalk(targetAppId, input.chatId, targetSenderId, undefined, senderUnionId, 'group')) continue;
           return { ownerAppId: targetAppId, selectedAt, selectionMessageId: message.message_id };
