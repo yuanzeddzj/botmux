@@ -14,6 +14,8 @@ export interface TopicProcessContainment {
   retire?(): void;
 }
 
+export class TopicContainmentPreflightError extends Error {}
+
 async function containLinuxTopicTree(roots: readonly number[]): Promise<TopicProcessContainment> {
   const environment = userSystemdBusEnv();
   if (!environment) throw new Error('topic containment needs a user systemd bus');
@@ -30,14 +32,17 @@ async function containLinuxTopicTree(roots: readonly number[]): Promise<TopicPro
   if (live.some(pid => pid === process.pid)) throw new Error('topic containment cannot own the daemon');
   if (!live.length) return { processes: [], release() {} };
   const captured = new Map<number, string>();
-  const initial = captureCodexNativeProcesses(live);
+  let initial: ReturnType<typeof captureCodexNativeProcesses>;
+  try { initial = captureCodexNativeProcesses(live); }
+  catch (error) { throw new TopicContainmentPreflightError(String(error)); }
   for (const entry of initial) captured.set(entry.pid, entry.started);
   const check = (entries: { pid: number; started: string }[]) => {
     if (entries.some(entry => readProcessStartIdentity(entry.pid) !== entry.started)) {
       throw new Error('topic containment process identity changed');
     }
   };
-  check(initial);
+  try { check(initial); }
+  catch (error) { throw new TopicContainmentPreflightError(String(error)); }
   run('busctl', ['--user', 'call', 'org.freedesktop.systemd1', '/org/freedesktop/systemd1',
     'org.freedesktop.systemd1.Manager', 'StartTransientUnit', 'ssa(sv)a(sa(sv))',
     unit, 'fail', '4', 'PIDs', 'au', String(initial.length), ...initial.map(entry => String(entry.pid)),
@@ -79,11 +84,16 @@ async function containLinuxTopicTree(roots: readonly number[]): Promise<TopicPro
     // the exact kernel cgroup, which also contains all future descendants.
     for (let attempt = 0; attempt < 4; attempt++) {
       const remaining = live.filter(pid => !topicProcessExited(pid, captured.get(pid)));
-      if (!remaining.length) break;
+      if (remaining.length !== live.length) throw new Error('topic root exited before complete containment proof');
       const snapshot = captureCodexNativeProcesses(remaining);
       for (const entry of snapshot) captured.set(entry.pid, entry.started);
       const outside = snapshot.filter(entry => !inScope(entry.pid));
-      if (!outside.length) return result();
+      if (!outside.length) {
+        if (live.some(pid => topicProcessExited(pid, captured.get(pid)))) {
+          throw new Error('topic root exited during containment verification');
+        }
+        return result();
+      }
       check(outside);
       run('busctl', ['--user', 'call', 'org.freedesktop.systemd1', '/org/freedesktop/systemd1',
         'org.freedesktop.systemd1.Manager', 'AttachProcessesToUnit', 'ssau', unit, '',
@@ -123,9 +133,12 @@ export async function containTopicProcessTree(roots: readonly number[]): Promise
   };
   try {
     const liveRoots = [...new Set(roots)].filter(pid => !topicProcessExited(pid, undefined));
+    const identities = new Map(liveRoots.map(pid => [pid, readProcessStartIdentity(pid)]));
+    if ([...identities.values()].some(identity => !identity)) {
+      throw new TopicContainmentPreflightError('topic producer identity unavailable');
+    }
     for (const pid of liveRoots) {
-      const started = readProcessStartIdentity(pid);
-      if (!started) throw new Error('topic producer identity unavailable');
+      const started = identities.get(pid)!;
       await stop(pid, started);
     }
     for (let attempt = 0; liveRoots.length > 0 && attempt < 4; attempt++) {

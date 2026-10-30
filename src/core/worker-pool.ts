@@ -42,8 +42,8 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { mayRestoreWriteAdmission } from '../adapters/backend/destroy-result.js';
 import { config } from '../config.js';
 import { currentTopicExecutionContext, topicExecutionAllowed } from '../services/exclusive-topic-owner.js';
-import { waitForTopicWorkerExit, topicProcessExited, containTopicProcessTree } from './topic-ownership-revoke.js';
-import { readProcessStartIdentity } from '../utils/process-identity.js';
+import { waitForTopicWorkerExit, topicProcessExited, containTopicProcessTree, TopicContainmentPreflightError } from './topic-ownership-revoke.js';
+import { readProcessStartIdentity, readDurableProcessIdentity } from '../utils/process-identity.js';
 import { stopSessionScope } from './session-scope.js';
 import { readGlobalConfig, isWorkflowFeatureEnabled } from '../global-config.js';
 import { workerExitDashboardEvent } from './worker-exit-dashboard-event.js';
@@ -9290,9 +9290,23 @@ export async function suspendTopicWorkerVerified(ds: DaemonSession): Promise<boo
     return false; // other persistent backends need attested process identities
   }
   if (backend === 'pty' && (ds.workerReady || ds.cliReady) && processes.length === 0) return false;
+  const pendingRetirement = ds.session.exclusiveTopicRetirement;
+  if (pendingRetirement && pendingRetirement.roots.some(entry =>
+    readDurableProcessIdentity(entry.pid) !== entry.identity)) return false;
+  if (!pendingRetirement && roots.length > 0) {
+    const expected = [...new Set(roots)].map(pid => ({ pid, identity: readDurableProcessIdentity(pid) }));
+    if (expected.some(entry => !entry.identity)) return false;
+    ds.session.exclusiveTopicRetirement = { roots: expected as Array<{ pid: number; identity: string }> };
+    sessionStore.updateSession(ds.session);
+  }
   let frozen: Awaited<ReturnType<typeof containTopicProcessTree>>;
   try { frozen = await containTopicProcessTree(roots); }
   catch (error) {
+    if (error instanceof TopicContainmentPreflightError
+      && ds.session.exclusiveTopicRetirement?.roots.every(entry => readDurableProcessIdentity(entry.pid) === entry.identity)) {
+      ds.session.exclusiveTopicRetirement = undefined;
+      sessionStore.updateSession(ds.session);
+    }
     logger.warn(`[topic-owner] producer freeze unverified: ${String(error)}`);
     return false;
   }
@@ -9320,6 +9334,8 @@ export async function suspendTopicWorkerVerified(ds: DaemonSession): Promise<boo
       await new Promise(resolve => setTimeout(resolve, 25));
     }
     if (processes.some(entry => !topicProcessExited(entry.pid, entry.start))) return false;
+    ds.session.exclusiveTopicRetirement = undefined;
+    if (ds.chatType === 'group' && ds.session.scope === 'chat') ds.session.exclusiveTopicLegacyRetired = true;
     ds.session.exclusiveTopicOwnerEpoch = undefined;
     ds.hasHistory = true;
     ds.session.suspendedColdResume = true;
@@ -9330,6 +9346,8 @@ export async function suspendTopicWorkerVerified(ds: DaemonSession): Promise<boo
 }
 
 function exclusiveTopicWorkerAllowed(ds: DaemonSession): boolean {
+  if (ds.session.exclusiveTopicLegacyRetired && getAllBots().some(bot =>
+    bot.config.larkAppId === ds.larkAppId && bot.config.exclusiveTopicOwner === true)) return false;
   if (ds.chatType !== 'group' || ds.session.scope === 'chat'
     || !ds.session.rootMessageId?.startsWith('om_')) return true;
   const bot = getAllBots().find(entry => entry.config.larkAppId === ds.larkAppId);

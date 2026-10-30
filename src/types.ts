@@ -528,6 +528,11 @@ export interface Session {
   scope?: 'thread' | 'chat';
   /** Epoch admitted by the shared topic coordinator; stale continuations cannot rebind it. */
   exclusiveTopicOwnerEpoch?: number;
+  /** Pending retirement roots remain authoritative across daemon restarts;
+   * losing descriptors is not proof that their orphaned descendants exited. */
+  exclusiveTopicRetirement?: { roots: Array<{ pid: number; identity: string }> };
+  /** A retired shared chat must not revive its old topic subscriptions. */
+  exclusiveTopicLegacyRetired?: true;
   /** This chat-scoped automation deliberately has no topic seed. Prevents the
    *  chat-mode conversion guard from treating chatId as a replyable message id. */
   externalTriggerTopicless?: boolean;

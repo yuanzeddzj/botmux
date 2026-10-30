@@ -2,6 +2,7 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync, type ChildProcess } from 'node:child_process';
+import * as childProcess from 'node:child_process';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { spawnTsEval, spawnTsEvalWithRepoImports } from './helpers/ts-runner.js';
 
@@ -499,5 +500,69 @@ describe('exclusive owner adversarial execution probes', () => {
     if (latePid > 1) extraPids.add(latePid);
     const lateAlive = latePid > 1 && !topicProcessExited(latePid, readProcessStartIdentity(latePid));
     expect(accepted && lateAlive, `accepted=${accepted}, late child=${latePid}, alive=${lateAlive}`).toBe(false);
+  });
+
+  it.skipIf(process.platform !== 'linux')('does not admit B when a child is born before its root enters the scope and the root exits before rescan', async () => {
+    const childPidFile = join(dataDir, 'before-scope-child.pid');
+    const root = spawnTsEvalWithRepoImports(`
+      import { writeFileSync } from 'node:fs';
+      import { spawnTsEval } from './test/helpers/ts-runner.js';
+      process.on('message', message => {
+        if (message.type === 'spawn-before-scope') {
+          const child = spawnTsEval('setInterval(() => {}, 1000)', {stdio: 'ignore'});
+          writeFileSync(${JSON.stringify(childPidFile)}, String(child.pid));
+        } else if (message.type === 'exit-after-scope') process.exit(0);
+      });
+      setInterval(() => {}, 1000);
+      console.log('READY');
+    `, { cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
+    children.add(root);
+    await new Promise<void>((resolve, reject) => {
+      root.once('error', reject);
+      root.stdout!.on('data', chunk => { if (String(chunk).includes('READY')) resolve(); });
+    });
+    const ds = session(root);
+    const actualExec = childProcess.execFileSync;
+    let outsideChild = 0;
+    let intercepted = false;
+    vi.spyOn(childProcess, 'execFileSync').mockImplementation(((command: any, args: any, options: any) => {
+      if (command !== 'busctl' || !args?.includes('StartTransientUnit') || intercepted) return actualExec(command, args, options);
+      intercepted = true;
+      root.send({ type: 'spawn-before-scope' });
+      for (let attempt = 0; attempt < 200; attempt++) {
+        try { outsideChild = Number(readFileSync(childPidFile, 'utf8')); } catch { /* other process preparing */ }
+        if (outsideChild > 1) break;
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
+      }
+      if (outsideChild <= 1) throw new Error('child probe did not start');
+      extraPids.add(outsideChild);
+      const result = actualExec(command, args, options);
+      root.send({ type: 'exit-after-scope' });
+      for (let attempt = 0; attempt < 200 && !topicProcessExited(root.pid!, undefined); attempt++) {
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
+      }
+      return result;
+    }) as any);
+    const coordinator = new ExclusiveTopicCoordinator({ dataDir, revokeOtherBots: async owner => {
+      if (owner.ownerAppId === 'b' && !await suspendTopicWorkerVerified(ds)) throw new Error('retirement unverified');
+    } });
+    await coordinator.admit(event('a', 1), async () => {});
+    const action = vi.fn(async () => {});
+    const accepted = await coordinator.admit(event('b', 2), action).catch(() => false);
+    const retry = await coordinator.admit(event('b', 3, false), action).catch(() => false);
+    // A daemon restore retains the Session but loses its worker descriptor and
+    // process attestation. The unresolved child must not become a fresh proof.
+    const restoredDs = { ...ds, session: { ...ds.session }, worker: null, workerReady: false, cliReady: false,
+      localProcessAttestation: undefined };
+    const restored = new ExclusiveTopicCoordinator({ dataDir, revokeOtherBots: async () => {
+      if (!await suspendTopicWorkerVerified(restoredDs)) throw new Error('retirement unverified');
+    } });
+    const afterRestore = await restored.admit(event('b', 4, false), action).catch(() => false);
+    expect(intercepted).toBe(true);
+    expect(outsideChild).toBeGreaterThan(1);
+    const childAlive = !topicProcessExited(outsideChild, readProcessStartIdentity(outsideChild));
+    expect(accepted && childAlive, `accepted=${accepted}, outside child=${outsideChild}, alive=${childAlive}`).toBe(false);
+    expect(retry && childAlive, 'another bare B input must not clear an unresolved retirement').toBe(false);
+    expect(afterRestore && childAlive, 'coordinator and daemon restoration must retain the unresolved retirement').toBe(false);
   });
 });

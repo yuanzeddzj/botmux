@@ -80,3 +80,18 @@ it('stops a busy worker and reports success only after its exit without deleting
   expect(ds.session.status).toBe('active');
   expect(ds.session.suspendedColdResume).toBe(true);
 });
+
+it('keeps a retired legacy shared-chat session from resuming its old subscriptions', async () => {
+  const ds = session();
+  ds.session.scope = 'chat';
+  vi.spyOn(TmuxBackend, 'probeSessionForTeardown').mockReturnValue('missing');
+  __testOnly_setSuspendBackingVerifier(() => true);
+  const worker = ds.worker;
+  worker.send.mockImplementation((message: any) => {
+    if (message.type === 'suspend') queueMicrotask(() => { worker.exitCode = 0; worker.emit('exit', 0); });
+  });
+  expect(await suspendTopicWorkerVerified(ds)).toBe(true);
+  const onAdmission = vi.fn();
+  expect(forkWorker(ds, 'late shared-topic continuation', true, { onAdmission })).toBe(false);
+  expect(onAdmission).toHaveBeenCalledWith('rejected');
+});
