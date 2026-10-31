@@ -10666,11 +10666,24 @@ ipcRoute('GET', '/api/bot-group-mention-policy', requireBoundBot((_req, res) => 
   jsonRes(res, 200, { ok: true, groupMentionRequired: cfg.groupMentionRequired === true,
     mentionlessThreadChats: cfg.mentionlessThreadChats ?? [] });
 }));
-botConfigPutRoute<{ groupAccessConfirmation?: unknown }>('/api/bot-group-access-confirmation', 'groupAccessConfirmation', {
-  normalize: body => typeof body.groupAccessConfirmation === 'boolean'
-    ? { ok: true, value: body.groupAccessConfirmation } : { ok: false, error: 'invalid_boolean' },
-  respond: value => ({ ok: true, groupAccessConfirmation: value === true }),
-});
+ipcRoute('PUT', '/api/bot-group-access-confirmation', requireBoundBot(async (req, res) => {
+  const body = await readJsonBodyOrBadJson<unknown>(req, res);
+  if (body === BAD_JSON) return;
+  if (!body || typeof body !== 'object' || Array.isArray(body)
+    || typeof (body as { groupAccessConfirmation?: unknown }).groupAccessConfirmation !== 'boolean') {
+    return jsonRes(res, 400, { ok: false, error: 'invalid_boolean' });
+  }
+  const value = (body as { groupAccessConfirmation: boolean }).groupAccessConfirmation;
+  // Authorization is independent of model selection. Revalidating an existing
+  // Auto model here would reject this unrelated toggle on deployed MAX pools.
+  const result = await rmwBotEntry(cachedLarkAppId, entry => {
+    entry.groupAccessConfirmation = value;
+    return { write: true, result: null };
+  });
+  if (!result.ok) return jsonRes(res, 400, { ok: false, error: result.reason });
+  getBot(cachedLarkAppId).config.groupAccessConfirmation = value || undefined;
+  jsonRes(res, 200, { ok: true, groupAccessConfirmation: value });
+}));
 
 botConfigPutRoute<{ groupMentionRequired?: unknown }>('/api/bot-group-mention-required', 'groupMentionRequired', {
   normalize: body => typeof body.groupMentionRequired === 'boolean'
