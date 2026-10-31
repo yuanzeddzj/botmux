@@ -2458,6 +2458,8 @@ export interface BotConfig {
   /** Require an explicit bot mention for group-message triggers. Existing
    * threads in mentionlessThreadChats may continue without it; DMs are unchanged. */
   groupMentionRequired?: boolean;
+  /** Ask the primary owner privately before opening a newly joined or requested group. */
+  groupAccessConfirmation?: boolean;
   /** Exact group IDs where existing native threads may continue without @.
    * This is not a grant; permissions and exclusive topic ownership still apply. */
   mentionlessThreadChats?: string[];
@@ -4476,6 +4478,7 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
         : undefined,
       exclusiveTopicOwner: entry.exclusiveTopicOwner === true || undefined,
       groupMentionRequired: entry.groupMentionRequired === true || undefined,
+      groupAccessConfirmation: entry.groupAccessConfirmation === true || undefined,
       mentionlessThreadChats: entry.mentionlessThreadChats === undefined
         ? undefined : [...new Set(normalizeStringList(entry.mentionlessThreadChats))],
       soloGroupMentionBypass: entry.soloGroupMentionBypass === false ? false : undefined,

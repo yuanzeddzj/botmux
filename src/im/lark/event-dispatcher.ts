@@ -62,6 +62,7 @@ import { tryHandleMentionModeCommand } from './mention-mode-command.js';
 import { isChatManager } from '../../services/chat-manager.js';
 import { tryHandleSubstituteCommand } from './substitute-command.js';
 import { buildGrantCard } from './card-builder.js';
+import { requestGroupAccessConfirmation } from './group-access-confirmation.js';
 import { openPending, isThrottled, clearPending, markPendingDelivered, tryReserveOwnerDmSlot, releaseOwnerDmSlot, claimThrottleNotice } from './grant-pending.js';
 import { resolveGrantApprover, resolveGrantRequestRoute, type GrantRequestRoute } from './grant-owner.js';
 import { localeForBot, t } from '../../i18n/index.js';
@@ -2496,6 +2497,11 @@ export async function maybeSendGrantRequestCard(
   // 必须在 autoGrantRequestCards / owner / 节流等一切判定之前短路。
   if (requesterOpenId && evaluateTalk(larkAppId, chatId, requesterOpenId).reason === 'blocked') return;
   // 下面两种拦截对申请人是静默的，info 日志是 owner 排查「别人 @ 没反应」的唯一线索。
+  if (getBot(larkAppId).config.groupAccessConfirmation === true
+    && message?.chat_type !== 'p2p' && requesterOpenId && opts?.notifyThrottledRequester) {
+    await requestGroupAccessConfirmation(larkAppId, chatId, 'mention', messageData);
+    return;
+  }
   if (getBot(larkAppId).config.autoGrantRequestCards === false) {
     logSilentGrantDrop(larkAppId, chatId, requesterOpenId, 'autoGrantRequestCards is off');
     return;
@@ -6021,6 +6027,11 @@ export function createLarkEventDispatcherRuntime(
       // 免@ 斜杠命令的命中结果：在群聊闸里结算，随 ctx 下发给 daemon 渲染 prompt。
       let commandTrigger: CommandTriggerMatch | undefined;
       if (chatType === 'group') {
+        if (!primary && explicitlyMentionedThisBot && getBot(larkAppId).config.groupAccessConfirmation === true
+          && (!senderOpenId || !getBot(larkAppId).resolvedBlockedUsers.includes(senderOpenId))) {
+          await requestGroupAccessConfirmation(larkAppId, chatId, 'mention', isAllowed ? undefined : data)
+            .catch(err => logger.warn(`[group-access:${larkAppId}] mention confirmation failed: ${String(err)}`));
+        }
         const mentionMode = resolveGroupMentionMode(larkAppId, chatId);
         const soloGroupMentionBypass = isSoloGroupMentionBypassEnabled(larkAppId, chatId);
         // 消息里 @ 了别的具体成员时,缓存里的 1人1bot 可能已过期（「刚拉了新 bot、
@@ -6599,6 +6610,8 @@ export function createLarkEventDispatcherRuntime(
         const chatId: string | undefined = data?.chat_id;
         const operatorOpenId: string | undefined = data?.operator_id?.open_id;
         if (!chatId) return;
+        await requestGroupAccessConfirmation(larkAppId, chatId, 'joined')
+          .catch(err => logger.warn(`[group-access:${larkAppId}] join confirmation failed: ${String(err)}`));
         // 拉新群时静默带进来的管家（决策看板）：只是进群好之后用自己的身份发消息，
         // 这次入群不跑入群钩子 / 入群命令 / 拉 owner / 自动开工，不发言也不开会话。
         if (isStewardSilentJoin(config.session.dataDir, larkAppId, chatId)) {

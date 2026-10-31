@@ -60,6 +60,9 @@ vi.mock('../src/utils/file-lock.js', async (importOriginal) => ({
 // chat.bot_added 观察钩子的发射断言口。真实现是 fire-and-forget 且无 hooks 配置时
 // 为 no-op；mock 掉让断言直接看发射参数（client.ts 的 emitHookEvent 引用也走这个
 // mock，本文件不覆盖其行为）。
+const groupAccessRequestMock = vi.hoisted(() => vi.fn(async () => {}));
+vi.mock('../src/im/lark/group-access-confirmation.js', () => ({ requestGroupAccessConfirmation: groupAccessRequestMock }));
+
 const { emitHookEventMock, runGroupJoinCommandMock } = vi.hoisted(() => ({ emitHookEventMock: vi.fn(), runGroupJoinCommandMock: vi.fn() }));
 vi.mock('../src/services/hook-runner.js', () => ({
   emitHookEvent: (...args: unknown[]) => emitHookEventMock(...args),
@@ -14523,5 +14526,45 @@ describe('exclusive topic owner routing', () => {
     expect(delivered).toEqual([MY_APP_ID, OTHER_BOT_APP_ID, OTHER_BOT_APP_ID]);
     expect(maximumRunningBots).toBe(1);
     expect([...running]).toEqual([OTHER_BOT_APP_ID]);
+  });
+});
+
+
+describe('whole-group private confirmation join entry', () => {
+  it('delivers the actual bot-added event once independently of automatic work', async () => {
+    capturedHandlers = {}; __resetAnchorQueues(); __resetEventClaimsForTest();
+    groupAccessRequestMock.mockClear(); setupBotState({ allowedUsers: [USER_OPEN_ID] });
+    const state = mockGetBot(MY_APP_ID);
+    state.config.groupAccessConfirmation = true; state.config.autoStartOnGroupJoin = false;
+    const handlers = { ...makeHandlers(), handleBotAdded: vi.fn(async () => {}) };
+    const runtime = createLarkEventDispatcherRuntime(MY_APP_ID, 'secret', handlers);
+    runtime.connect();
+    try {
+      const event = { chat_id: 'oc_group_access_join', operator_id: { open_id: USER_OPEN_ID },
+        event_id: 'group-access-join-once', header: { event_id: 'group-access-join-once' } };
+      capturedHandlers['im.chat.member.bot.added_v1'](event);
+      capturedHandlers['im.chat.member.bot.added_v1'](event);
+      for (let i = 0; i < 4; i++) await flushEventWork();
+      expect(groupAccessRequestMock).toHaveBeenCalledExactlyOnceWith(MY_APP_ID, 'oc_group_access_join', 'joined');
+    } finally { runtime.close(); }
+  });
+});
+
+
+describe('whole-group private confirmation explicit human mention entry', () => {
+  it('an already-authorized human mention asks about unopened group without replaying the same allowed input', async () => {
+    capturedHandlers = {}; __resetAnchorQueues(); __resetEventClaimsForTest();
+    groupAccessRequestMock.mockClear(); setupBotState({ allowedUsers: [USER_OPEN_ID], groupMentionRequired: true });
+    mockGetBot(MY_APP_ID).config.groupAccessConfirmation = true;
+    const handlers = makeHandlers(); const runtime = createLarkEventDispatcherRuntime(MY_APP_ID, 'secret', handlers);
+    runtime.connect();
+    try {
+      const event = makeUserMessageEvent({ senderOpenId: USER_OPEN_ID, chatId: 'oc_group_access_at', chatType: 'group',
+        messageId: 'om_group_access_at', content: JSON.stringify({ text: '@_user_1 请处理' }),
+        mentions: [{ key: '@_user_1', name: 'Target', id: { open_id: MY_OPEN_ID } }] });
+      await capturedHandlers['im.message.receive_v1'](event);
+      for (let i = 0; i < 4; i++) await flushEventWork();
+      expect(groupAccessRequestMock).toHaveBeenCalledWith(MY_APP_ID, 'oc_group_access_at', 'mention', undefined);
+    } finally { runtime.close(); }
   });
 });

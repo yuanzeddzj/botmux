@@ -8339,6 +8339,7 @@ ipcRoute('GET', '/api/bot-default-oncall', requireBoundBot(async (_req, res) => 
     regularGroupReplyMode: cardPrefs.regularGroupReplyMode,
     regularGroupMentionMode: cardPrefs.regularGroupMentionMode,
     groupMentionRequired: getBot(cachedLarkAppId).config.groupMentionRequired === true,
+    groupAccessConfirmation: getBot(cachedLarkAppId).config.groupAccessConfirmation === true,
     mentionlessThreadChats: getBot(cachedLarkAppId).config.mentionlessThreadChats ?? [],
     quotaFallbackBot: (() => {
       try { return getBot(cachedLarkAppId).config.quotaFallbackBot ?? null; }
@@ -10665,6 +10666,12 @@ ipcRoute('GET', '/api/bot-group-mention-policy', requireBoundBot((_req, res) => 
   jsonRes(res, 200, { ok: true, groupMentionRequired: cfg.groupMentionRequired === true,
     mentionlessThreadChats: cfg.mentionlessThreadChats ?? [] });
 }));
+botConfigPutRoute<{ groupAccessConfirmation?: unknown }>('/api/bot-group-access-confirmation', 'groupAccessConfirmation', {
+  normalize: body => typeof body.groupAccessConfirmation === 'boolean'
+    ? { ok: true, value: body.groupAccessConfirmation } : { ok: false, error: 'invalid_boolean' },
+  respond: value => ({ ok: true, groupAccessConfirmation: value === true }),
+});
+
 botConfigPutRoute<{ groupMentionRequired?: unknown }>('/api/bot-group-mention-required', 'groupMentionRequired', {
   normalize: body => typeof body.groupMentionRequired === 'boolean'
     ? { ok: true, value: body.groupMentionRequired } : { ok: false, error: 'invalid_boolean' },
