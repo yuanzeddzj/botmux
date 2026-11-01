@@ -143,6 +143,7 @@ const mockListChatMessages = vi.fn(async () => [] as any[]);
 const mockListChatMessagesUntil = vi.fn(async () => [] as any[]);
 const mockListThreadMessages = vi.fn(async () => [] as any[]);
 const mockGetMessageDetail = vi.fn(async () => ({ items: [] as any[] }));
+const mockGetNativeThreadRootMessage = vi.fn(async () => undefined as any);
 const mockResolveUnionIdFromOpenId = vi.fn(async () => null as string | null);
 const mockResolveUnionIdFromOpenIdStrict = vi.fn(async () => ({ status: 'unavailable' as const }));
 // 默认所有 open_id 都判为「非真人」（bot）→ 保持既有用例「全部登记」的预期；
@@ -167,6 +168,7 @@ vi.mock('../src/im/lark/client.js', () => ({
   replyMessage: (...args: any[]) => mockReplyMessage(...args),
   updateMessage: (...args: any[]) => mockUpdateMessage(...args),
   getMessageDetail: (...args: any[]) => mockGetMessageDetail(...args),
+  getNativeThreadRootMessage: (...args: any[]) => mockGetNativeThreadRootMessage(...args),
   resolveUnionIdFromOpenId: (...args: any[]) => mockResolveUnionIdFromOpenId(...args),
   resolveUnionIdFromOpenIdStrict: (...args: any[]) => mockResolveUnionIdFromOpenIdStrict(...args),
   isHumanOpenId: (...args: any[]) => mockIsHumanOpenId(...args),
@@ -292,6 +294,7 @@ beforeEach(() => {
   mockResolveCurrentChatBotOpenIds.mockReset().mockResolvedValue({ ok: false, error: 'live_membership_unavailable', message: 'default_no_resolution' });
   mockListThreadMessages.mockReset().mockResolvedValue([]);
   mockGetMessageDetail.mockReset().mockResolvedValue({ items: [] });
+  mockGetNativeThreadRootMessage.mockReset().mockResolvedValue(undefined);
   mockResolveUnionIdFromOpenId.mockReset().mockResolvedValue(null);
   mockResolveUnionIdFromOpenIdStrict.mockReset().mockResolvedValue({ status: 'unavailable' });
   mockIsSubstituteEnabledForChat.mockReset().mockReturnValue(true);
@@ -14552,6 +14555,35 @@ describe('whole-group private confirmation join entry', () => {
 
 
 describe('whole-group private confirmation explicit human mention entry', () => {
+  it('keeps an authorized replay in the nested thread containing the @, despite an ancestor root_id', async () => {
+    capturedHandlers = {}; __resetAnchorQueues(); __resetEventClaimsForTest();
+    setupBotState({ allowedUsers: [USER_OPEN_ID], groupMentionRequired: true });
+    mockGetBot(MY_APP_ID).config.exclusiveTopicOwner = true;
+    const event = makeUserMessageEvent({ senderOpenId: USER_OPEN_ID, chatId: 'oc_nested_replay', chatType: 'group',
+      rootId: 'om_ancestor', threadId: null, messageId: 'om_nested_at',
+      content: JSON.stringify({ text: '@_user_1 请回答' }),
+      mentions: [{ key: '@_user_1', name: 'Target', id: { open_id: MY_OPEN_ID } }] });
+    (event.message as any).parent_id = 'om_quoted_reply';
+    mockGetMessageDetail.mockImplementation(async (...args: any[]) => ({ items: [args[1] === 'om_nested_at'
+      ? { message_id: 'om_nested_at', chat_id: 'oc_nested_replay', thread_id: 'omt_nested', root_id: 'om_ancestor' }
+      : { message_id: 'om_ancestor', chat_id: 'oc_nested_replay', thread_id: 'omt_ancestor' }] }));
+    mockGetNativeThreadRootMessage.mockResolvedValue({ message_id: 'om_nested_at', chat_id: 'oc_nested_replay', thread_id: 'omt_nested' });
+    const handlers = makeHandlers();
+    const exclusiveTopics = { currentOwner: () => MY_APP_ID,
+      admit: vi.fn(async (_input: any, action: () => Promise<void>) => { await action(); return true; }) };
+    const runtime = createLarkEventDispatcherRuntime(MY_APP_ID, 'secret', handlers, 'feishu', undefined, { exclusiveTopics });
+    runtime.connect();
+    try {
+      vi.mocked(logger.error).mockClear();
+      (handlers as EventHandlers).replayMessageEvent!(event);
+      for (let i = 0; i < 6; i++) await flushEventWork();
+      expect(vi.mocked(logger.error).mock.calls).toEqual([]);
+      expect(handlers.handleNewTopic).toHaveBeenCalledWith(event, expect.objectContaining({ scope: 'thread', anchor: 'om_nested_at' }));
+      expect(event.message.root_id).toBe('om_nested_at');
+      expect(event.message.thread_id).toBe('omt_nested');
+    } finally { runtime.close(); }
+  });
+
   it('an already-authorized human mention asks about unopened group without replaying the same allowed input', async () => {
     capturedHandlers = {}; __resetAnchorQueues(); __resetEventClaimsForTest();
     groupAccessRequestMock.mockClear(); setupBotState({ allowedUsers: [USER_OPEN_ID], groupMentionRequired: true });

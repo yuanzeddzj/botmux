@@ -2251,6 +2251,15 @@ export async function listMessagesByThreadId(larkAppId: string, threadId: string
   return listByThread(getBotClient(larkAppId), threadId, pageSize);
 }
 
+/** One bounded native-container read; ancestor root_id is not a topic id. */
+export async function getNativeThreadRootMessage(larkAppId: string, threadId: string): Promise<any | undefined> {
+  const res = await larkGet(getBotClient(larkAppId), '/open-apis/im/v1/messages', {
+    container_id_type: 'thread', container_id: threadId, sort_type: 'ByCreateTimeAsc', page_size: 1,
+  });
+  if (res.code !== 0) throw larkApiError('get native thread root', res);
+  return res.data?.items?.[0];
+}
+
 export async function listThreadMessages(larkAppId: string, chatId: string, rootMessageId: string, pageSize: number = 50): Promise<any[]> {
   return (await listThreadMessagesWithContext(larkAppId, chatId, rootMessageId, pageSize)).messages;
 }

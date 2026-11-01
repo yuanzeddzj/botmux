@@ -11,7 +11,8 @@ import { createHash } from 'node:crypto';
 import { startLarkConnection } from './transport/connection.js';
 import { getBot, getAllBots, getBotOpenId, findOncallChat, getOwnerOpenId, loadBotConfigs, loadBotConfigsCached, vcMeetingAgentConfigActive, type BotConfig, type BotState } from '../../bot-registry.js';
 import { config, isVcMeetingAgentGloballyEnabled, vcMeetingAgentGlobalListenerBotAppId } from '../../config.js';
-import { getChatInfo, getChatMode, getChatModeStrict, getCachedChatMode, getChatName, getUserProfile, getMessageDetail, listChatMessagesUntil, resolveSiblingBotBySenderOpenId, resolveUnionIdFromOpenId, resolveUnionIdFromOpenIdStrict, replyMessage, sendUserMessage, isHumanOpenId, updateMessage } from './client.js';
+import { getChatInfo, getChatMode, getChatModeStrict, getCachedChatMode, getChatName, getUserProfile, getMessageDetail, getNativeThreadRootMessage, listChatMessagesUntil, resolveSiblingBotBySenderOpenId, resolveUnionIdFromOpenId, resolveUnionIdFromOpenIdStrict, replyMessage, sendUserMessage, isHumanOpenId, updateMessage } from './client.js';
+import { createNestedThreadRootResolver } from './nested-thread-root.js';
 import { listChats, type ChatBrief } from '../../services/groups-store.js';
 import { classifyLarkError } from './error-classify.js';
 import { ListenerCircuitBreaker } from '../../services/listener-circuit-breaker.js';
@@ -4896,6 +4897,10 @@ export function createLarkEventDispatcherRuntime(
   durableInboxShadow?: DurableInboxStore,
   runtimeOptions: LarkEventDispatcherRuntimeOptions = {},
 ): LarkEventDispatcherRuntime {
+  const resolveNestedThreadRoot = createNestedThreadRootResolver({
+    lookupMessage: async (appId, messageId) => (await getMessageDetail(appId, messageId, { userCardContent: false }))?.items?.[0],
+    lookupThreadRoot: getNativeThreadRootMessage,
+  });
   const forwardFollowups = new ForwardFollowupBuffer<PendingForwardTopicPayload>(
     config.daemon.forwardFollowupWaitMs,
     err => logger.error(`Error flushing delayed topic seed: ${err}`),
@@ -5203,6 +5208,14 @@ export function createLarkEventDispatcherRuntime(
       const selfEcho = !!getBot(larkAppId).botOpenId && (sender?.sender_type === 'app' || sender?.sender_type === 'bot')
         && (sender?.sender_id?.open_id ?? sender?.sender_id?.app_id) === getBot(larkAppId).botOpenId;
       if (!selfEcho && groupMentionPolicyBlocks(larkAppId, message, chatType)) return;
+
+      if (!selfEcho && chatType === 'group') {
+        const native = await resolveNestedThreadRoot(larkAppId, message);
+        if (native) {
+          if (native.rootId !== message.root_id) logger.info(`[routing] nested thread ${native.threadId} uses root=${native.rootId}`);
+          message.root_id = native.rootId; message.thread_id = native.threadId;
+        }
+      }
 
       // Bot-originated messages — bots historically only post inside threads
       // (their own thread replies). With chat-scope sessions a bot can also
