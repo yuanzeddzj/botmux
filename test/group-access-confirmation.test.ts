@@ -31,7 +31,7 @@ import { sendUserMessage, sendMessage, replyMessage, updateMessage } from '../sr
 import { isInChat } from '../src/services/groups-store.js';
 import { addAllowedChatGroup, addChatGrant, chatQuotaKey } from '../src/services/grant-store.js';
 import { GroupAccessRequestStore } from '../src/services/group-access-request-store.js';
-import { requestGroupAccessConfirmation, handleGroupAccessAction, buildGroupAccessCard, GROUP_ACCESS_APPROVE, GROUP_ACCESS_DENY, GROUP_ACCESS_APPROVE_PERSON } from '../src/im/lark/group-access-confirmation.js';
+import { requestGroupAccessConfirmation, handleGroupAccessAction, buildGroupAccessCard, dismissWhitelistSelfRequest, GROUP_ACCESS_APPROVE, GROUP_ACCESS_DENY, GROUP_ACCESS_APPROVE_PERSON } from '../src/im/lark/group-access-confirmation.js';
 import { maybeSendGrantRequestCard, canTalk, canOperate } from '../src/im/lark/event-dispatcher.js';
 import { handleCardAction } from '../src/im/lark/card-handler.js';
 
@@ -61,7 +61,7 @@ beforeEach(() => {
 afterEach(() => { delete process.env.BOTS_CONFIG; vi.restoreAllMocks(); rmSync(tempDir, { recursive: true, force: true }); });
 
 describe('owner-private whole-group confirmation', () => {
-  it.each([undefined, 'approved', 'denied'] as const)('uses supported Feishu layout fields for outcome %s', outcome => {
+  it.each([undefined, 'approved', 'denied', 'dismissed'] as const)('uses supported Feishu layout fields for outcome %s', outcome => {
     const card = JSON.parse(buildGroupAccessCard({ version: 1, appId: APP, chatId: GROUP,
       ownerOpenId: OWNER, nonce: 'persisted_nonce', chatName: '测试协作群', reason: 'mention',
       state: 'pending', createdAt: Date.now() }, outcome));
@@ -138,11 +138,68 @@ describe('owner-private whole-group confirmation', () => {
     expect(current().deliveredRequesterOpenId).toBe('ou_guest');
   });
 
-  it('an allowed sender is displayed without replaying their work, then a waiting guest replaces that subject', async () => {
+  it('the owner uses the bot without creating a card or holding their work', async () => {
     await requestGroupAccessConfirmation(APP, GROUP, 'mention', humanEvent(OWNER), { replay: false });
-    expect(current().requester?.openId).toBe(OWNER); expect(current().messageData).toBeUndefined();
+    expect(sendUserMessage).not.toHaveBeenCalled(); expect(store().read(APP, GROUP)).toBeUndefined();
     await requestGroupAccessConfirmation(APP, GROUP, 'mention', humanEvent());
     expect(current().requester?.openId).toBe('ou_guest'); expect(current().messageData).toEqual(humanEvent());
+  });
+
+  it('a whitelist co-owner cannot cause a self-authorization request from an alternate caller', async () => {
+    getBot(APP).resolvedAllowedUsers.push('ou_coowner');
+    await requestGroupAccessConfirmation(APP, GROUP, 'mention', humanEvent('ou_coowner'));
+    expect(sendUserMessage).not.toHaveBeenCalled(); expect(store().read(APP, GROUP)).toBeUndefined();
+  });
+
+  it('other effective permission sources skip authorization requests when the ingress verdict allows them', async () => {
+    await requestGroupAccessConfirmation(APP, GROUP, 'mention', humanEvent('ou_granted'), { replay: false });
+    expect(sendUserMessage).not.toHaveBeenCalled(); expect(store().read(APP, GROUP)).toBeUndefined();
+  });
+
+  it('a whitelist message does not create or replace a guest waiting request', async () => {
+    await requestGroupAccessConfirmation(APP, GROUP, 'mention', humanEvent());
+    const original = current();
+    await requestGroupAccessConfirmation(APP, GROUP, 'mention', humanEvent(OWNER), { replay: false });
+    expect(current()).toEqual(original); expect(sendUserMessage).toHaveBeenCalledTimes(1);
+    expect(updateMessage).not.toHaveBeenCalled();
+  });
+
+  it('retires an old whitelist self-request without granting or denying anyone access', async () => {
+    const request = { version: 1 as const, appId: APP, chatId: GROUP, ownerOpenId: OWNER,
+      nonce: 'old_nonce', chatName: '协作群', reason: 'mention' as const, state: 'pending' as const,
+      createdAt: Date.now(), messageId: privateId, requester: { openId: OWNER, name: '本人', messageId: 'om_original' } };
+    await store().transact(APP, GROUP, async (_old, save) => save(request));
+    expect(await dismissWhitelistSelfRequest(APP, GROUP)).toBe(true);
+    expect(current().state).toBe('dismissed');
+    expect(updateMessage).toHaveBeenCalledWith(APP, privateId, expect.stringContaining('无需授权'));
+    const callback = await handleGroupAccessAction(APP, value(), OWNER, privateId);
+    expect(JSON.stringify(callback)).toContain('无需授权'); expect(JSON.stringify(callback)).not.toContain('group_access_approve');
+    expect(addAllowedChatGroup).not.toHaveBeenCalled(); expect(addChatGrant).not.toHaveBeenCalled();
+    expect(canTalk(APP, GROUP, OWNER)).toBe(true); expect(canTalk(APP, GROUP, 'ou_guest')).toBe(false);
+    await requestGroupAccessConfirmation(APP, GROUP, 'mention', humanEvent());
+    expect(current().state).toBe('pending'); expect(current().nonce).not.toBe('old_nonce');
+  });
+
+  it('keeps guest requests, join prompts and approved grants during self-request cleanup', async () => {
+    await requestGroupAccessConfirmation(APP, GROUP, 'mention', humanEvent());
+    expect(await dismissWhitelistSelfRequest(APP, GROUP)).toBe(false);
+    await handleGroupAccessAction(APP, value(), OWNER, privateId);
+    expect(await dismissWhitelistSelfRequest(APP, GROUP)).toBe(false); expect(current().state).toBe('approved');
+    await requestGroupAccessConfirmation(PEER, GROUP, 'joined');
+    expect(await dismissWhitelistSelfRequest(PEER, GROUP)).toBe(false);
+    expect(updateMessage).not.toHaveBeenCalled();
+  });
+
+  it('retries the corrected card after an update failure without reinstating permission buttons', async () => {
+    const request = { version: 1 as const, appId: APP, chatId: GROUP, ownerOpenId: OWNER,
+      nonce: 'old_nonce', chatName: '协作群', reason: 'mention' as const, state: 'pending' as const,
+      createdAt: Date.now(), messageId: privateId, requester: { openId: OWNER, name: '本人', messageId: 'om_original' } };
+    await store().transact(APP, GROUP, async (_old, save) => save(request));
+    vi.mocked(updateMessage).mockRejectedValueOnce(new Error('card unavailable'));
+    await expect(dismissWhitelistSelfRequest(APP, GROUP)).rejects.toThrow('card unavailable');
+    expect(current().state).toBe('dismissed');
+    expect(await dismissWhitelistSelfRequest(APP, GROUP)).toBe(true);
+    expect(addAllowedChatGroup).not.toHaveBeenCalled(); expect(addChatGrant).not.toHaveBeenCalled();
   });
 
   it('later applicants cannot change the person bound to an existing waiting card', async () => {

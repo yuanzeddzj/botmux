@@ -35,10 +35,11 @@ function humanRequester(data: any, chatId: string): { openId: string; name?: str
 }
 
 /** Blue decision card, one primary action, explicit durable group scope. */
-export function buildGroupAccessCard(request: GroupAccessRequest, outcome?: 'approved' | 'denied'): string {
+export function buildGroupAccessCard(request: GroupAccessRequest, outcome?: 'approved' | 'denied' | 'dismissed'): string {
   const approved = outcome === 'approved';
+  const dismissed = outcome === 'dismissed';
   const person = request.approvalScope === 'person';
-  const title = outcome ? (approved ? (person ? '已开放给此人' : '已开放全群使用') : '暂不开放') : '确认使用授权';
+  const title = dismissed ? '你已获准使用，无需授权' : outcome ? (approved ? (person ? '已开放给此人' : '已开放全群使用') : '暂不开放') : '确认使用授权';
   const color = outcome ? (approved ? 'green' : 'grey') : 'blue';
   const button = (action: string, label: string, primary: boolean) => ({
     tag: 'button', text: { tag: 'plain_text', content: label },
@@ -50,7 +51,7 @@ export function buildGroupAccessCard(request: GroupAccessRequest, outcome?: 'app
     schema: '2.0',
     config: { update_multi: true, enable_forward: false, width_mode: 'default' },
     header: { template: color, title: { tag: 'plain_text', content: title },
-      subtitle: { tag: 'plain_text', content: request.reason === 'joined' ? '我已加入这个群' : '群内有人 @ 我请求使用' },
+      subtitle: { tag: 'plain_text', content: dismissed ? '已关闭重复申请' : request.reason === 'joined' ? '我已加入这个群' : '群内有人 @ 我请求使用' },
       icon: { tag: 'standard_icon', token: 'chat_outlined' } },
     body: { direction: 'vertical', padding: '12px', vertical_spacing: 'large', elements: [
       { tag: 'markdown', content: `**[${escape(request.chatName)}](${chatAppLink(request.chatId, normalizeBrand(getBot(request.appId).config.brand))})**` },
@@ -58,7 +59,7 @@ export function buildGroupAccessCard(request: GroupAccessRequest, outcome?: 'app
         { tag: 'column', width: 'weighted', weight: 1, padding: '12px', elements: [
           ...(request.requester ? [{ tag: 'markdown', content: '触发 @ 的人' },
             { tag: 'person', user_id: request.requester.openId, show_name: true, show_avatar: true, size: 'small' }] : []),
-          { tag: 'markdown', content: outcome === 'denied' ? '当前群保持原有授权范围。' :
+          { tag: 'markdown', content: dismissed ? '你已在白名单中，可直接使用，无需再次确认。\n这张重复申请已关闭；其他成员的权限保持原样。' : outcome === 'denied' ? '当前群保持原有授权范围。' :
             `使用范围：${approved ? (person ? `仅${escape(request.requester?.name ?? '此人')}在本群使用` : '此群所有成员') : (request.requester ? '请选择仅此人或全群' : '此群所有成员')}\n授权时效：长期有效，不限对话次数\n管理权限：仍由你和已有管理员持有` },
         ] },
       ] },
@@ -79,6 +80,12 @@ export async function requestGroupAccessConfirmation(
   options?: { replay?: boolean; refreshCard?: boolean },
 ): Promise<void> {
   if (getBot(appId).config.groupAccessConfirmation !== true || groupOpen(appId, chatId)) return;
+  const incomingRequester = humanRequester(messageData, chatId);
+  // The caller already evaluated all talk sources. Never turn an allowed turn
+  // into a new permission decision; admin identity is independently guarded
+  // here for alternate callers and older persisted requests.
+  if (reason === 'mention' && (options?.replay === false && options?.refreshCard !== true
+    || incomingRequester && isBotAdmin(appId, incomingRequester.openId))) return;
   const owner = getOwnerOpenId(appId);
   if (!owner || !isBotAdmin(appId, owner)) {
     logger.warn(`[group-access:${appId}] owner unavailable; no group fallback`);
@@ -88,7 +95,7 @@ export async function requestGroupAccessConfirmation(
     if (groupOpen(appId, chatId)) return;
     if (old?.state === 'approving') return;
     if (old?.state === 'denied' && Date.now() - (old.decidedAt ?? old.createdAt) < DENY_COOLDOWN_MS) return;
-    const incoming = humanRequester(messageData, chatId);
+    const incoming = incomingRequester;
     if (old?.state === 'approved' && old.approvalScope === 'person'
       && incoming?.openId === old.requester?.openId && personGrantActive(old)) return;
     let request = old?.state === 'pending' && old.ownerOpenId === owner ? old : undefined;
@@ -125,6 +132,19 @@ export async function requestGroupAccessConfirmation(
   });
 }
 
+/** Retire only obsolete whitelist self-requests. This does not approve, deny,
+ * or revoke any permission and never touches a genuine guest or join request. */
+export async function dismissWhitelistSelfRequest(appId: string, chatId: string): Promise<boolean> {
+  return store().transact(appId, chatId, async (request, save) => {
+    if (!request || !['pending', 'dismissed'].includes(request.state) || request.reason !== 'mention'
+      || !request.requester || !isBotAdmin(appId, request.requester.openId)
+      || request.ownerOpenId !== getOwnerOpenId(appId)) return false;
+    request.state = 'dismissed'; request.decidedAt ??= Date.now(); delete request.messageData; save(request);
+    if (request.messageId) await updateMessage(appId, request.messageId, buildGroupAccessCard(request, 'dismissed'));
+    return true;
+  });
+}
+
 export function isGroupAccessAction(action: unknown): boolean {
   return action === GROUP_ACCESS_APPROVE || action === GROUP_ACCESS_DENY || action === GROUP_ACCESS_APPROVE_PERSON;
 }
@@ -144,7 +164,7 @@ export async function handleGroupAccessAction(
   let pendingReplay: unknown;
   const result = await store().transact(appId, value.chat_id, async (request, save) => {
     if (!request || request.nonce !== value.nonce || request.ownerOpenId !== owner || request.messageId !== cardMessageId) return error('确认卡已失效或不属于当前群。');
-    if (request.state === 'approved' || request.state === 'denied') {
+    if (request.state === 'approved' || request.state === 'denied' || request.state === 'dismissed') {
       if (request.state === 'approved' && !(request.approvalScope === 'person' ? personGrantActive(request) : groupOpen(appId, request.chatId))) return error('该授权已撤销，请使用新的确认卡。');
       return JSON.parse(buildGroupAccessCard(request, request.state));
     }

@@ -13,7 +13,7 @@ export interface GroupAccessRequest {
   nonce: string;
   chatName: string;
   reason: 'joined' | 'mention';
-  state: 'pending' | 'approving' | 'approved' | 'denied';
+  state: 'pending' | 'approving' | 'approved' | 'denied' | 'dismissed';
   createdAt: number;
   decidedAt?: number;
   messageId?: string;
@@ -48,7 +48,7 @@ export class GroupAccessRequestStore {
       || typeof v.nonce !== 'string' || !v.nonce
       || typeof v.chatName !== 'string'
       || !['joined', 'mention'].includes(v.reason)
-      || !['pending', 'approving', 'approved', 'denied'].includes(v.state)
+      || !['pending', 'approving', 'approved', 'denied', 'dismissed'].includes(v.state)
       || !Number.isSafeInteger(v.createdAt) || v.createdAt < 0
       || (v.messageId !== undefined && typeof v.messageId !== 'string')
       || (v.approvalScope !== undefined && !['group', 'person'].includes(v.approvalScope))

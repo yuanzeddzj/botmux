@@ -14555,6 +14555,40 @@ describe('whole-group private confirmation join entry', () => {
 
 
 describe('whole-group private confirmation explicit human mention entry', () => {
+  it.each(['chatGrant', 'globalGrant'] as const)('%s users also work directly without a permission card', async source => {
+    capturedHandlers = {}; __resetAnchorQueues(); __resetEventClaimsForTest(); groupAccessRequestMock.mockClear();
+    setupBotState({ allowedUsers: ['ou_owner'], groupMentionRequired: true,
+      ...(source === 'chatGrant' ? { chatGrants: { oc_granted_at: [USER_OPEN_ID] } } : { globalGrants: [USER_OPEN_ID] }) });
+    mockGetBot(MY_APP_ID).config.groupAccessConfirmation = true;
+    const handlers = makeHandlers(), runtime = createLarkEventDispatcherRuntime(MY_APP_ID, 'secret', handlers);
+    runtime.connect();
+    try {
+      const event = makeUserMessageEvent({ senderOpenId: USER_OPEN_ID, chatId: 'oc_granted_at', chatType: 'group',
+        messageId: `om_granted_${source}`, content: JSON.stringify({ text: '@_user_1 请处理' }),
+        mentions: [{ key: '@_user_1', name: 'Target', id: { open_id: MY_OPEN_ID } }] });
+      await capturedHandlers['im.message.receive_v1'](event);
+      for (let i = 0; i < 4; i++) await flushEventWork();
+      expect(groupAccessRequestMock).not.toHaveBeenCalled(); expect(handlers.handleNewTopic).toHaveBeenCalledOnce();
+    } finally { runtime.close(); }
+  });
+
+  it('an unauthorized guest still creates an approval request without starting work', async () => {
+    capturedHandlers = {}; __resetAnchorQueues(); __resetEventClaimsForTest(); groupAccessRequestMock.mockClear();
+    setupBotState({ allowedUsers: ['ou_owner'], groupMentionRequired: true });
+    mockGetBot(MY_APP_ID).config.groupAccessConfirmation = true;
+    const handlers = makeHandlers(), runtime = createLarkEventDispatcherRuntime(MY_APP_ID, 'secret', handlers);
+    runtime.connect();
+    try {
+      const event = makeUserMessageEvent({ senderOpenId: USER_OPEN_ID, chatId: 'oc_guest_at', chatType: 'group',
+        messageId: 'om_guest_at', content: JSON.stringify({ text: '@_user_1 请处理' }),
+        mentions: [{ key: '@_user_1', name: 'Target', id: { open_id: MY_OPEN_ID } }] });
+      await capturedHandlers['im.message.receive_v1'](event);
+      for (let i = 0; i < 4; i++) await flushEventWork();
+      expect(groupAccessRequestMock).toHaveBeenCalledWith(MY_APP_ID, 'oc_guest_at', 'mention', event, { replay: true });
+      expect(handlers.handleNewTopic).not.toHaveBeenCalled(); expect(handlers.handleThreadReply).not.toHaveBeenCalled();
+    } finally { runtime.close(); }
+  });
+
   it('keeps an authorized replay in the nested thread containing the @, despite an ancestor root_id', async () => {
     capturedHandlers = {}; __resetAnchorQueues(); __resetEventClaimsForTest();
     setupBotState({ allowedUsers: [USER_OPEN_ID], groupMentionRequired: true });
@@ -14584,7 +14618,7 @@ describe('whole-group private confirmation explicit human mention entry', () => 
     } finally { runtime.close(); }
   });
 
-  it('an already-authorized human mention asks about unopened group without replaying the same allowed input', async () => {
+  it('an already-authorized human mention works directly without asking them to authorize themselves', async () => {
     capturedHandlers = {}; __resetAnchorQueues(); __resetEventClaimsForTest();
     groupAccessRequestMock.mockClear(); setupBotState({ allowedUsers: [USER_OPEN_ID], groupMentionRequired: true });
     mockGetBot(MY_APP_ID).config.groupAccessConfirmation = true;
@@ -14596,7 +14630,8 @@ describe('whole-group private confirmation explicit human mention entry', () => 
         mentions: [{ key: '@_user_1', name: 'Target', id: { open_id: MY_OPEN_ID } }] });
       await capturedHandlers['im.message.receive_v1'](event);
       for (let i = 0; i < 4; i++) await flushEventWork();
-      expect(groupAccessRequestMock).toHaveBeenCalledWith(MY_APP_ID, 'oc_group_access_at', 'mention', event, { replay: false });
+      expect(groupAccessRequestMock).not.toHaveBeenCalled();
+      expect(handlers.handleNewTopic).toHaveBeenCalledOnce();
     } finally { runtime.close(); }
   });
 });

@@ -6040,7 +6040,7 @@ export function createLarkEventDispatcherRuntime(
       // 免@ 斜杠命令的命中结果：在群聊闸里结算，随 ctx 下发给 daemon 渲染 prompt。
       let commandTrigger: CommandTriggerMatch | undefined;
       if (chatType === 'group') {
-        if (!primary && explicitlyMentionedThisBot && getBot(larkAppId).config.groupAccessConfirmation === true
+        if (!primary && !isAllowed && explicitlyMentionedThisBot && getBot(larkAppId).config.groupAccessConfirmation === true
           && (!senderOpenId || !getBot(larkAppId).resolvedBlockedUsers.includes(senderOpenId))) {
           await requestGroupAccessConfirmation(larkAppId, chatId, 'mention', data, { replay: !isAllowed })
             .catch(err => logger.warn(`[group-access:${larkAppId}] mention confirmation failed: ${String(err)}`));
