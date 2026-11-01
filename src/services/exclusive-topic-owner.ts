@@ -146,7 +146,7 @@ export class ExclusiveTopicCoordinator implements ExclusiveTopics {
         selectionMessageId: input.messageId,
         protocol: 'v2',
         ...(input.followupOwnerOpenId ? { followupOwnerOpenId: input.followupOwnerOpenId }
-          : previous?.ownerAppId === input.selectedAppId && previous.followupOwnerOpenId
+          : previous && previous.ownerAppId === input.selectedAppId && previous.followupOwnerOpenId
             ? { followupOwnerOpenId: previous.followupOwnerOpenId } : {}),
       };
       writeRecord(path, next);
