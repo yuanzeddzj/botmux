@@ -14564,7 +14564,7 @@ describe('whole-group private confirmation explicit human mention entry', () => 
         mentions: [{ key: '@_user_1', name: 'Target', id: { open_id: MY_OPEN_ID } }] });
       await capturedHandlers['im.message.receive_v1'](event);
       for (let i = 0; i < 4; i++) await flushEventWork();
-      expect(groupAccessRequestMock).toHaveBeenCalledWith(MY_APP_ID, 'oc_group_access_at', 'mention', undefined);
+      expect(groupAccessRequestMock).toHaveBeenCalledWith(MY_APP_ID, 'oc_group_access_at', 'mention', event, { replay: false });
     } finally { runtime.close(); }
   });
 });

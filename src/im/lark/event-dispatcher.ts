@@ -6029,7 +6029,7 @@ export function createLarkEventDispatcherRuntime(
       if (chatType === 'group') {
         if (!primary && explicitlyMentionedThisBot && getBot(larkAppId).config.groupAccessConfirmation === true
           && (!senderOpenId || !getBot(larkAppId).resolvedBlockedUsers.includes(senderOpenId))) {
-          await requestGroupAccessConfirmation(larkAppId, chatId, 'mention', isAllowed ? undefined : data)
+          await requestGroupAccessConfirmation(larkAppId, chatId, 'mention', data, { replay: !isAllowed })
             .catch(err => logger.warn(`[group-access:${larkAppId}] mention confirmation failed: ${String(err)}`));
         }
         const mentionMode = resolveGroupMentionMode(larkAppId, chatId);

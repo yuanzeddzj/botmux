@@ -19,6 +19,9 @@ export interface GroupAccessRequest {
   messageId?: string;
   messageData?: unknown;
   replayClaimed?: boolean;
+  requester?: { openId: string; name: string; messageId: string };
+  approvalScope?: 'group' | 'person';
+  deliveredRequesterOpenId?: string;
 }
 
 /** One durable decision per bot/group. Pending cards have no expiry. */
@@ -48,6 +51,10 @@ export class GroupAccessRequestStore {
       || !['pending', 'approving', 'approved', 'denied'].includes(v.state)
       || !Number.isSafeInteger(v.createdAt) || v.createdAt < 0
       || (v.messageId !== undefined && typeof v.messageId !== 'string')
+      || (v.approvalScope !== undefined && !['group', 'person'].includes(v.approvalScope))
+      || (v.deliveredRequesterOpenId !== undefined && !/^ou_[\w-]+$/.test(v.deliveredRequesterOpenId))
+      || (v.requester !== undefined && (!/^ou_[\w-]+$/.test(v.requester.openId)
+        || typeof v.requester.name !== 'string' || typeof v.requester.messageId !== 'string'))
       || (v.decidedAt !== undefined && !Number.isSafeInteger(v.decidedAt))) {
       throw new Error('invalid group access request record');
     }
