@@ -34,8 +34,8 @@ export function buildGroupAccessCard(request: GroupAccessRequest, outcome?: 'app
       icon: { tag: 'standard_icon', token: 'chat_outlined' } },
     body: { direction: 'vertical', padding: '12px', vertical_spacing: 'large', elements: [
       { tag: 'markdown', content: `**${escape(request.chatName)}**` },
-      { tag: 'column_set', flex_mode: 'none', background_style: 'grey-50', padding: '12px', columns: [
-        { tag: 'column', width: 'weighted', weight: 1, elements: [
+      { tag: 'column_set', flex_mode: 'none', background_style: 'grey-50', columns: [
+        { tag: 'column', width: 'weighted', weight: 1, padding: '12px', elements: [
           { tag: 'markdown', content: outcome === 'denied' ? '当前群保持原有授权范围。' : '使用范围：此群所有成员\n授权时效：长期有效，不限对话次数\n管理权限：仍由你和已有管理员持有' },
         ] },
       ] },

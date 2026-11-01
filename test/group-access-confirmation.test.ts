@@ -58,6 +58,22 @@ beforeEach(() => {
 afterEach(() => { delete process.env.BOTS_CONFIG; vi.restoreAllMocks(); rmSync(tempDir, { recursive: true, force: true }); });
 
 describe('owner-private whole-group confirmation', () => {
+  it.each([undefined, 'approved', 'denied'] as const)('uses supported Feishu layout fields for outcome %s', outcome => {
+    const card = JSON.parse(buildGroupAccessCard({ version: 1, appId: APP, chatId: GROUP,
+      ownerOpenId: OWNER, nonce: 'persisted_nonce', chatName: '测试协作群', reason: 'mention',
+      state: 'pending', createdAt: Date.now() }, outcome));
+    // Feishu rejects the entire card with 230099 / 200621 when a column_set
+    // carries padding. Check every state, including the callback replacement.
+    const parse = (node: any): void => {
+      if (!node || typeof node !== 'object') return;
+      if (node.tag === 'column_set' && 'padding' in node) {
+        throw new Error('200621: unknown property padding on column_set');
+      }
+      for (const child of Object.values(node)) parse(child);
+    };
+    expect(() => parse(card)).not.toThrow();
+  });
+
   it('bot join creates a private card without opening the group', async () => {
     await requestGroupAccessConfirmation(APP, GROUP, 'joined');
     expect(sendUserMessage).toHaveBeenCalledWith(APP, OWNER, expect.any(String), 'interactive', current().nonce);
