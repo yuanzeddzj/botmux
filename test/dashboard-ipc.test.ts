@@ -225,7 +225,7 @@ afterEach(async () => {
 });
 
 describe('dashboard IPC server', () => {
-  it('updates private group confirmation on an Auto MAX pool without rewriting models or permissions', async () => {
+  it.each(['groupAccessConfirmation', 'ownerMentionFollowup'] as const)('updates %s on an Auto MAX pool without rewriting models or permissions', async key => {
     const dir = mkdtempSync(join(tmpdir(), 'group-access-ipc-'));
     const path = join(dir, 'bots.json'), previous = process.env.BOTS_CONFIG;
     const fixture = { larkAppId: 'cli_group_access_ipc', larkAppSecret: 'fixture', cliId: 'traex',
@@ -238,19 +238,19 @@ describe('dashboard IPC server', () => {
       process.env.BOTS_CONFIG = path; writeFileSync(path, JSON.stringify([fixture]));
       loadBotConfigs().forEach(registerBot); setLarkAppId(fixture.larkAppId); setIpcAuthSecret(TEST_IPC_SECRET);
       handle = await startIpcServer({ port: 0, host: '127.0.0.1', authRequired: true });
-      const route = '/api/bot-group-access-confirmation', base = `http://127.0.0.1:${handle.port}`;
+      const route = key === 'ownerMentionFollowup' ? '/api/bot-owner-mention-followup' : '/api/bot-group-access-confirmation', base = `http://127.0.0.1:${handle.port}`;
       const put = (body: unknown, auth = true) => fetch(base + route, { method: 'PUT',
         headers: { ...(auth ? trustedHostHeaders('PUT', route, handle!.port) : {}), 'content-type': 'application/json' }, body: JSON.stringify(body) });
-      expect((await put({ groupAccessConfirmation: true }, false)).status).toBe(401);
+      expect((await put({ [key]: true }, false)).status).toBe(401);
       for (const value of [true, false, true]) {
-        const response = await put({ groupAccessConfirmation: value });
-        expect(response.status).toBe(200); expect(await response.json()).toEqual({ ok: true, groupAccessConfirmation: value });
-        expect(getBot(fixture.larkAppId).config.groupAccessConfirmation === true).toBe(value);
+        const response = await put({ [key]: value });
+        expect(response.status).toBe(200); expect(await response.json()).toEqual({ ok: true, [key]: value });
+        expect(getBot(fixture.larkAppId).config[key] === true).toBe(value);
         const saved = JSON.parse(readFileSync(path, 'utf8'))[0];
-        expect(saved).toEqual({ ...fixture, groupAccessConfirmation: value });
-        expect(loadBotConfigs()[0].groupAccessConfirmation === true).toBe(value);
+        expect(saved).toEqual({ ...fixture, [key]: value });
+        expect(loadBotConfigs()[0][key] === true).toBe(value);
       }
-      for (const invalid of [null, [], {}, { groupAccessConfirmation: 'on' }]) expect((await put(invalid)).status).toBe(400);
+      for (const invalid of [null, [], {}, { [key]: 'on' }]) expect((await put(invalid)).status).toBe(400);
     } finally {
       if (previous === undefined) delete process.env.BOTS_CONFIG; else process.env.BOTS_CONFIG = previous;
       rmSync(dir, { recursive: true, force: true });

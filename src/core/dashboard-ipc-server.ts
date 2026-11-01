@@ -8340,6 +8340,7 @@ ipcRoute('GET', '/api/bot-default-oncall', requireBoundBot(async (_req, res) => 
     regularGroupMentionMode: cardPrefs.regularGroupMentionMode,
     groupMentionRequired: getBot(cachedLarkAppId).config.groupMentionRequired === true,
     groupAccessConfirmation: getBot(cachedLarkAppId).config.groupAccessConfirmation === true,
+    ownerMentionFollowup: getBot(cachedLarkAppId).config.ownerMentionFollowup === true,
     mentionlessThreadChats: getBot(cachedLarkAppId).config.mentionlessThreadChats ?? [],
     quotaFallbackBot: (() => {
       try { return getBot(cachedLarkAppId).config.quotaFallbackBot ?? null; }
@@ -10666,6 +10667,22 @@ ipcRoute('GET', '/api/bot-group-mention-policy', requireBoundBot((_req, res) => 
   jsonRes(res, 200, { ok: true, groupMentionRequired: cfg.groupMentionRequired === true,
     mentionlessThreadChats: cfg.mentionlessThreadChats ?? [] });
 }));
+ipcRoute('PUT', '/api/bot-owner-mention-followup', requireBoundBot(async (req, res) => {
+  const body = await readJsonBodyOrBadJson<unknown>(req, res);
+  if (body === BAD_JSON) return;
+  if (!body || typeof body !== 'object' || Array.isArray(body)
+    || typeof (body as { ownerMentionFollowup?: unknown }).ownerMentionFollowup !== 'boolean') {
+    return jsonRes(res, 400, { ok: false, error: 'invalid_boolean' });
+  }
+  const value = (body as { ownerMentionFollowup: boolean }).ownerMentionFollowup;
+  const result = await rmwBotEntry(cachedLarkAppId, entry => {
+    entry.ownerMentionFollowup = value; return { write: true, result: null };
+  });
+  if (!result.ok) return jsonRes(res, 400, { ok: false, error: result.reason });
+  getBot(cachedLarkAppId).config.ownerMentionFollowup = value || undefined;
+  jsonRes(res, 200, { ok: true, ownerMentionFollowup: value });
+}));
+
 ipcRoute('PUT', '/api/bot-group-access-confirmation', requireBoundBot(async (req, res) => {
   const body = await readJsonBodyOrBadJson<unknown>(req, res);
   if (body === BAD_JSON) return;

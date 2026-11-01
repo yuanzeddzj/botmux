@@ -13,6 +13,7 @@ import { getBot, getAllBots, getBotOpenId, findOncallChat, getOwnerOpenId, loadB
 import { config, isVcMeetingAgentGloballyEnabled, vcMeetingAgentGlobalListenerBotAppId } from '../../config.js';
 import { getChatInfo, getChatMode, getChatModeStrict, getCachedChatMode, getChatName, getUserProfile, getMessageDetail, getNativeThreadRootMessage, listChatMessagesUntil, resolveSiblingBotBySenderOpenId, resolveUnionIdFromOpenId, resolveUnionIdFromOpenIdStrict, replyMessage, sendUserMessage, isHumanOpenId, updateMessage } from './client.js';
 import { createNestedThreadRootResolver } from './nested-thread-root.js';
+import { createOwnerMentionFollowupResolver, isOwnerMentionFollowupAddress } from './owner-mention-followup.js';
 import { listChats, type ChatBrief } from '../../services/groups-store.js';
 import { classifyLarkError } from './error-classify.js';
 import { ListenerCircuitBreaker } from '../../services/listener-circuit-breaker.js';
@@ -2781,6 +2782,8 @@ export interface RoutingContext {
   summaryCommand?: SummaryCommandRuntimeContext;
   /** This turn was triggered by @mentioning a configured substitute person. */
   substituteTrigger?: import('../../types.js').SubstituteTrigger;
+  /** Verified primary-owner delegation to this topic's current bot. */
+  ownerMentionFollowup?: boolean;
   /** 本轮由免@ 斜杠命令（commandTriggers）触发；带配置的模板与本条消息的参数。 */
   commandTrigger?: CommandTriggerMatch;
   /** This turn was triggered by a configured group message listener. */
@@ -3440,8 +3443,9 @@ function isMessageTriggerClaimed(larkAppId: string, messageId: string): boolean 
 /** A configured hard boundary for message triggers, evaluated before every
  * mentionless shortcut and again when delayed/polled messages dispatch.
  * Native root+thread provenance excludes top-level quoted messages and seeds. */
-function groupMentionPolicyBlocks(larkAppId: string, message: any, chatType: 'group' | 'p2p'): boolean {
+function groupMentionPolicyBlocks(larkAppId: string, message: any, chatType: 'group' | 'p2p', ownerFollowup = false): boolean {
   const cfg = getBot(larkAppId).config;
+  if (ownerFollowup && cfg.ownerMentionFollowup === true && cfg.exclusiveTopicOwner === true) return false;
   if (chatType === 'p2p' || cfg.groupMentionRequired !== true
     || isBotMentioned(larkAppId, message, undefined)) return false;
   const inAllowedThread = cfg.mentionlessThreadChats?.includes(message?.chat_id)
@@ -3458,7 +3462,7 @@ async function dispatchHumanMessageViaHandlers(
   capMs?: number,
 ): Promise<void> {
   const appId = payload.ctx.larkAppId ?? larkAppId;
-  if (groupMentionPolicyBlocks(appId, payload.data.message, payload.ctx.chatType === 'p2p' ? 'p2p' : 'group')) return;
+  if (groupMentionPolicyBlocks(appId, payload.data.message, payload.ctx.chatType === 'p2p' ? 'p2p' : 'group', payload.ctx.ownerMentionFollowup)) return;
   const messageId = payload.ctx.messageId;
   if (messageId && isMessageTriggerClaimed(appId, messageId)) {
     logger.debug(`[message-trigger:${appId}] duplicate dispatch ignored msg=${messageId.substring(0, 12)}`);
@@ -3478,7 +3482,7 @@ async function dispatchHumanMessageViaHandlers(
     await serializeByAnchor(payload.ctx.anchor, () => {
       // Configuration can change while this message waits behind an earlier
       // turn's admission; recheck before invoking the actual input handler.
-      if (groupMentionPolicyBlocks(appId, payload.data.message, payload.ctx.chatType === 'p2p' ? 'p2p' : 'group')) return Promise.resolve();
+      if (groupMentionPolicyBlocks(appId, payload.data.message, payload.ctx.chatType === 'p2p' ? 'p2p' : 'group', payload.ctx.ownerMentionFollowup)) return Promise.resolve();
       const ownsSession = handlers.isSessionOwner?.(payload.ctx.anchor, larkAppId) ?? payload.ownsSession;
       return ownsSession
         ? handlers.handleThreadReply(payload.data, payload.ctx)
@@ -4921,8 +4925,14 @@ export function createLarkEventDispatcherRuntime(
     // message-listener) keeps serializeByAnchor's default cap.
     const exclusive = payload.ctx.exclusiveTopic;
     if (exclusive) {
-      await exclusiveTopics().admit(exclusiveInput(payload.data, exclusive), () =>
-        dispatchHumanMessageViaHandlers(larkAppId, handlers, payload, 0));
+      await exclusiveTopics().admit(exclusiveInput(payload.data, exclusive), async () => {
+        if (payload.ctx.ownerMentionFollowup) {
+          const owner = getOwnerOpenId(larkAppId);
+          if (!owner || !isOwnerMentionFollowupAddress(payload.data.message, owner)
+            || !await resolveOwnerMentionFollowup(larkAppId, payload.ctx.chatId, exclusive.rootId, owner)) return;
+        }
+        await dispatchHumanMessageViaHandlers(larkAppId, handlers, payload, 0);
+      });
       return;
     }
     await dispatchHumanMessageViaHandlers(larkAppId, handlers, payload, 0);
@@ -4973,6 +4983,18 @@ export function createLarkEventDispatcherRuntime(
     createdAt: Math.max(Number(data.message.create_time) || 0, Number(data.message.update_time) || 0) || Date.now(),
     selectedAppId: topic.selectedAppId,
     threadId: data.message.thread_id,
+    ...(topic.selectedAppId && data.sender?.sender_type === 'user'
+      && data.sender?.sender_id?.open_id === getOwnerOpenId(larkAppId)
+      ? { followupOwnerOpenId: getOwnerOpenId(larkAppId) } : {}),
+  });
+  const resolveOwnerMentionFollowup = createOwnerMentionFollowupResolver({
+    currentSelection: (chatId, rootId) => exclusiveTopics().currentSelection?.(chatId, rootId),
+    lookupSelector: async (appId, messageId) => {
+      const message = (await getMessageDetail(appId, messageId, { userCardContent: false }))?.items?.[0];
+      if (message?.sender?.sender_type !== 'user' || message.sender.id_type !== 'open_id') return;
+      return { chatId: message.chat_id, openId: message.sender.id,
+        mentionedThisBot: messageMentionsBot(message, appId, getBotOpenId(appId)) };
+    },
   });
   const dispatchPersistedForwardFollowup = async (
     seedMessageId: string,
@@ -5207,7 +5229,18 @@ export function createLarkEventDispatcherRuntime(
       // daemon-owned self echoes retain their internal /close lifecycle path.
       const selfEcho = !!getBot(larkAppId).botOpenId && (sender?.sender_type === 'app' || sender?.sender_type === 'bot')
         && (sender?.sender_id?.open_id ?? sender?.sender_id?.app_id) === getBot(larkAppId).botOpenId;
-      if (!selfEcho && groupMentionPolicyBlocks(larkAppId, message, chatType)) return;
+      const ownerFollowupCandidate = sender?.sender_type === 'user' && chatType === 'group'
+        && getBot(larkAppId).config.ownerMentionFollowup === true
+        && getBot(larkAppId).config.exclusiveTopicOwner === true
+        && isOwnerMentionFollowupAddress(message, getOwnerOpenId(larkAppId));
+      if (!selfEcho && groupMentionPolicyBlocks(larkAppId, message, chatType) && !ownerFollowupCandidate) return;
+
+      if (ownerFollowupCandidate && !message.thread_id) {
+        const detail = (await getMessageDetail(larkAppId, messageId, { userCardContent: false }))?.items?.[0];
+        if (detail?.message_id === messageId && detail.chat_id === chatId && detail.thread_id) {
+          message.thread_id = detail.thread_id;
+        }
+      }
 
       if (!selfEcho && chatType === 'group') {
         const native = await resolveNestedThreadRoot(larkAppId, message);
@@ -5673,11 +5706,25 @@ export function createLarkEventDispatcherRuntime(
         replyRootId = message.root_id;
       }
       const explicitlyMentionedThisBot = isBotMentioned(larkAppId, message, senderOpenId);
+      const ownerMentionFollowup = !!(ownerFollowupCandidate && !explicitlyMentionedThisBot
+        && message.root_id && message.thread_id
+        && !stripLeadingMentions(extractMessageTextForRouting(message)?.trim() ?? '', message.mentions ?? []).trim().startsWith('/')
+        && !getAllBots().some(bot => messageMentionsBot(message, bot.config.larkAppId, bot.botOpenId))
+        && await resolveOwnerMentionFollowup(larkAppId, chatId, message.root_id, getOwnerOpenId(larkAppId)!));
+      if (ownerFollowupCandidate && !ownerMentionFollowup && !explicitlyMentionedThisBot) return;
+      if (ownerMentionFollowup && !isAllowed) {
+        if (primary) return ignoredUnsupportedPrimarySideEffect('grant request cards');
+        if (senderOpenId && !getBot(larkAppId).resolvedBlockedUsers.includes(senderOpenId)) {
+          await requestGroupAccessConfirmation(larkAppId, chatId, 'mention', data, { addressedOwner: true })
+            .catch(err => logger.warn(`[group-access:${larkAppId}] owner mention confirmation failed: ${String(err)}`));
+        }
+        return;
+      }
       let exclusiveTopic: { rootId: string; selectedAppId?: string } | undefined;
       if (chatType === 'group' && sender?.sender_type === 'user'
         && getBot(larkAppId).config.exclusiveTopicOwner === true && isAllowed) {
         const hasOtherMention = mentionsAnotherMember(larkAppId, message);
-        if (!explicitlyMentionedThisBot && hasOtherMention) return;
+        if (!explicitlyMentionedThisBot && hasOtherMention && !ownerMentionFollowup) return;
         if (explicitlyMentionedThisBot || (message.root_id && message.thread_id)) {
           if (explicitlyMentionedThisBot && hasOtherMention) {
             const configuredTargets = getAllBots().filter(bot =>
@@ -5741,7 +5788,7 @@ export function createLarkEventDispatcherRuntime(
       // 会话 / 是 solo 群 / mentionMode 放开，仍会被喂进去并弹卡片（用户实测现象）。
       // 直接 @ 本 bot（explicitlyMentionedThisBot）不受影响：黑名单只静音替身代答，
       // 不静音「直接找 bot 问问题」。/substitute 命令已在上方 command 处理器拦截。
-      if (substituteCfg?.enabled === true
+      if (!ownerMentionFollowup && substituteCfg?.enabled === true
           && chatType === 'group'
           && !explicitlyMentionedThisBot
           && isSubstituteExcludedChat(substituteCfg, chatId)
@@ -5752,7 +5799,9 @@ export function createLarkEventDispatcherRuntime(
         );
         return;
       }
-      let substituteTrigger = substituteChatMode
+      let substituteTrigger = ownerMentionFollowup ? {
+        target: { openId: getOwnerOpenId(larkAppId), name: '本人' }, disclosure: 'prefix' as const,
+      } : substituteChatMode
         ? resolveSubstituteTrigger(larkAppId, message)
         : undefined;
       if (substituteTrigger && !explicitlyMentionedThisBot) {
@@ -5760,7 +5809,7 @@ export function createLarkEventDispatcherRuntime(
         const stripped = rawText ? stripLeadingMentions(rawText.trim(), message?.mentions ?? []).trim() : '';
         if (stripped.startsWith('/')) substituteTrigger = undefined;
       }
-      if (substituteTrigger && substituteChatMode === 'topic'
+      if (!ownerMentionFollowup && substituteTrigger && substituteChatMode === 'topic'
           && substituteCfg?.topicActiveSessionTrigger === false
           && (handlers.isSessionOwner?.(routing.anchor, larkAppId) ?? false)) {
         // 话题里已有本 bot 活跃会话 + 用户关掉了「活跃话题也触发」：
@@ -5776,7 +5825,7 @@ export function createLarkEventDispatcherRuntime(
         }
       }
       if (substituteTrigger) {
-        if (substituteChatMode === 'group') {
+        if (!ownerMentionFollowup && substituteChatMode === 'group') {
           routing.scope = 'chat';
           routing.anchor = chatId;
           routingSource = 'regular-group-chat';
@@ -6263,6 +6312,7 @@ export function createLarkEventDispatcherRuntime(
           ? { name: 'summary-command', chatKind: summaryCommandMatch.chatKind }
           : undefined,
         substituteTrigger,
+        ...(ownerMentionFollowup ? { ownerMentionFollowup: true } : {}),
         messageListener,
         forwardSeedData: pairedForwardSeed?.payload.data,
         ...(

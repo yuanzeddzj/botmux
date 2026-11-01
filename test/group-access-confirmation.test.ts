@@ -97,6 +97,16 @@ describe('owner-private whole-group confirmation', () => {
     expect(current().requester).toEqual({ openId: 'ou_guest', name: '申请人', messageId: 'om_waiting' });
   });
 
+  it('owner-addressed requests use the same private decision and replay the exact waiting message', async () => {
+    const event = humanEvent(); await requestGroupAccessConfirmation(APP, GROUP, 'mention', event, { addressedOwner: true });
+    expect(current().addressedOwner).toBe(true);
+    expect(vi.mocked(sendUserMessage).mock.calls[0][2]).toContain('有人 @ 你询问我正在跟进的话题');
+    expect(sendMessage).not.toHaveBeenCalled(); expect(replyMessage).not.toHaveBeenCalled();
+    const replay = vi.fn(); await handleGroupAccessAction(APP, personValue(), OWNER, privateId, replay);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(replay).toHaveBeenCalledExactlyOnceWith(event, APP);
+  });
+
   it('person approval grants only this person in this group, permanently, without management', async () => {
     await requestGroupAccessConfirmation(APP, GROUP, 'mention', humanEvent());
     const replay = vi.fn(), action = personValue();

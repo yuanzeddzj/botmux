@@ -14635,3 +14635,103 @@ describe('whole-group private confirmation explicit human mention entry', () => 
     } finally { runtime.close(); }
   });
 });
+
+describe('owner mention after topic delegation', () => {
+  const OWNER = USER_OPEN_ID, GUEST = 'ou_followup_guest', CHAT = 'oc_owner_followup', ROOT = 'om_owner_followup';
+  function setup(options: { authorized?: boolean; enabled?: boolean; selectedApp?: string; delegated?: boolean } = {}) {
+    capturedHandlers = {}; __resetAnchorQueues(); __resetEventClaimsForTest(); groupAccessRequestMock.mockClear();
+    mockGetOwnerOpenId.mockReturnValue(OWNER);
+    const bot = setupBotState({ allowedUsers: [OWNER], exclusiveTopicOwner: true, groupMentionRequired: true,
+      ...(options.authorized ? { chatGrants: { [CHAT]: [GUEST] } } : {}) });
+    bot.config.ownerMentionFollowup = options.enabled !== false; bot.config.groupAccessConfirmation = true;
+    mockGetAllBots.mockReturnValue([bot]);
+    let selectedApp = options.selectedApp ?? MY_APP_ID;
+    let row = { chatId: CHAT, rootId: ROOT, ownerAppId: selectedApp, epoch: 1, selectedAt: 1,
+      selectionMessageId: 'om_owner_selected', protocol: 'v2' as const,
+      ...(options.delegated === false ? {} : { followupOwnerOpenId: OWNER }) };
+    const exclusiveTopics = {
+      currentOwner: () => selectedApp,
+      currentSelection: () => row,
+      select: vi.fn(async (input: any) => { selectedApp = input.selectedAppId; row = { ...row, ...input, ownerAppId: selectedApp }; }),
+      admit: vi.fn(async (input: any, action: () => Promise<void>) => { if (selectedApp !== input.larkAppId) return false; await action(); return true; }),
+    };
+    const handlers = makeHandlers(); handlers.isSessionOwner.mockReturnValue(true);
+    const runtime = createLarkEventDispatcherRuntime(MY_APP_ID, 'secret', handlers, 'feishu', undefined, { exclusiveTopics });
+    runtime.connect();
+    const event = () => makeUserMessageEvent({ senderOpenId: GUEST, chatId: CHAT, rootId: ROOT, threadId: 'omt_owner_followup',
+      messageId: 'om_followup_request', content: JSON.stringify({ text: '@_owner 现在进度怎么样' }),
+      mentions: [{ key: '@_owner', name: 'Owner', id: { open_id: OWNER } }] });
+    return { bot, handlers, runtime, event, exclusiveTopics, setOwner: (app: string) => { selectedApp = app; row = { ...row, ownerAppId: app }; } };
+  }
+  it('routes an authorized @owner into the selected bot and original thread without a new card', async () => {
+    const test = setup({ authorized: true }); const event = test.event();
+    try {
+      await capturedHandlers['im.message.receive_v1'](event); for (let i = 0; i < 4; i++) await flushEventWork();
+      expect(test.handlers.handleThreadReply).toHaveBeenCalledWith(event, expect.objectContaining({ scope: 'thread', anchor: ROOT,
+        ownerMentionFollowup: true, exclusiveTopic: { rootId: ROOT }, substituteTrigger: expect.objectContaining({ target: { openId: OWNER, name: '本人' } }) }));
+      expect(test.handlers.handleNewTopic).not.toHaveBeenCalled(); expect(groupAccessRequestMock).not.toHaveBeenCalled();
+    } finally { test.runtime.close(); }
+  });
+  it('asks privately for an unauthorized @owner and replays it only after permission exists', async () => {
+    const test = setup(); const event = test.event();
+    try {
+      await capturedHandlers['im.message.receive_v1'](event); for (let i = 0; i < 4; i++) await flushEventWork();
+      expect(groupAccessRequestMock).toHaveBeenCalledWith(MY_APP_ID, CHAT, 'mention', event, { addressedOwner: true });
+      expect(test.handlers.handleThreadReply).not.toHaveBeenCalled(); expect(test.handlers.handleNewTopic).not.toHaveBeenCalled();
+      test.bot.config.chatGrants = { [CHAT]: [GUEST] };
+      (test.handlers as EventHandlers).replayMessageEvent!(event); for (let i = 0; i < 4; i++) await flushEventWork();
+      expect(test.handlers.handleThreadReply).toHaveBeenCalledOnce();
+    } finally { test.runtime.close(); }
+  });
+  it.each([{ selectedApp: 'cli_other' }, { enabled: false }, { delegated: false }])('keeps inactive and unassigned bots silent: %j', async options => {
+    const test = setup({ authorized: true, ...options });
+    try {
+      await capturedHandlers['im.message.receive_v1'](test.event()); for (let i = 0; i < 4; i++) await flushEventWork();
+      expect(test.handlers.handleThreadReply).not.toHaveBeenCalled(); expect(groupAccessRequestMock).not.toHaveBeenCalled();
+    } finally { test.runtime.close(); }
+  });
+  it('never executes an old pending @owner after another bot takes over', async () => {
+    const test = setup(); const event = test.event();
+    try {
+      await capturedHandlers['im.message.receive_v1'](event); for (let i = 0; i < 4; i++) await flushEventWork();
+      test.bot.config.chatGrants = { [CHAT]: [GUEST] }; test.setOwner('cli_other');
+      (test.handlers as EventHandlers).replayMessageEvent!(event); for (let i = 0; i < 4; i++) await flushEventWork();
+      expect(test.handlers.handleThreadReply).not.toHaveBeenCalled();
+    } finally { test.runtime.close(); }
+  });
+  it('rechecks the primary owner when a followup finally reaches topic admission', async () => {
+    const test = setup({ authorized: true });
+    test.exclusiveTopics.admit.mockImplementationOnce(async (_input: any, action: () => Promise<void>) => {
+      mockGetOwnerOpenId.mockReturnValue('ou_new_owner'); await action(); return true;
+    });
+    try {
+      await capturedHandlers['im.message.receive_v1'](test.event()); for (let i = 0; i < 4; i++) await flushEventWork();
+      expect(test.handlers.handleThreadReply).not.toHaveBeenCalled();
+    } finally { test.runtime.close(); }
+  });
+  it('does not turn top-level owner addresses, bot redirects or slash commands into follow-up work', async () => {
+    const test = setup({ authorized: true });
+    try {
+      const top = test.event(); delete top.message.root_id; delete top.message.thread_id; top.message.message_id = 'om_owner_top';
+      await capturedHandlers['im.message.receive_v1'](top);
+      const slash = test.event(); slash.message.message_id = 'om_owner_slash'; slash.message.content = JSON.stringify({ text: '@_owner /restart' });
+      await capturedHandlers['im.message.receive_v1'](slash);
+      const redirect = test.event(); redirect.message.message_id = 'om_owner_redirect';
+      redirect.message.mentions!.push({ key: '@_peer', name: 'Other bot', id: { open_id: 'ou_peer' }, mentioned_type: 'bot' } as any);
+      await capturedHandlers['im.message.receive_v1'](redirect);
+      for (let i = 0; i < 4; i++) await flushEventWork();
+      expect(test.handlers.handleThreadReply).not.toHaveBeenCalled(); expect(test.handlers.handleNewTopic).not.toHaveBeenCalled();
+      expect(groupAccessRequestMock).not.toHaveBeenCalled();
+    } finally { test.runtime.close(); }
+  });
+  it('marks explicit owner selection so later @owner can use persisted delegation', async () => {
+    const test = setup({ authorized: true });
+    try {
+      const event = makeUserMessageEvent({ senderOpenId: OWNER, chatId: CHAT, rootId: ROOT, threadId: 'omt_owner_followup',
+        messageId: 'om_select_followup', content: JSON.stringify({ text: '@_bot 跟进这个话题' }),
+        mentions: [{ key: '@_bot', name: 'Bot', id: { open_id: MY_OPEN_ID } }] });
+      await capturedHandlers['im.message.receive_v1'](event); for (let i = 0; i < 4; i++) await flushEventWork();
+      expect(test.exclusiveTopics.select).toHaveBeenCalledWith(expect.objectContaining({ followupOwnerOpenId: OWNER, selectedAppId: MY_APP_ID }));
+    } finally { test.runtime.close(); }
+  });
+});

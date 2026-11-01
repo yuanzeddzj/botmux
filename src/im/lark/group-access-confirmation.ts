@@ -51,7 +51,8 @@ export function buildGroupAccessCard(request: GroupAccessRequest, outcome?: 'app
     schema: '2.0',
     config: { update_multi: true, enable_forward: false, width_mode: 'default' },
     header: { template: color, title: { tag: 'plain_text', content: title },
-      subtitle: { tag: 'plain_text', content: dismissed ? '已关闭重复申请' : request.reason === 'joined' ? '我已加入这个群' : '群内有人 @ 我请求使用' },
+      subtitle: { tag: 'plain_text', content: dismissed ? '已关闭重复申请' : request.reason === 'joined' ? '我已加入这个群'
+        : request.addressedOwner ? '有人 @ 你询问我正在跟进的话题' : '群内有人 @ 我请求使用' },
       icon: { tag: 'standard_icon', token: 'chat_outlined' } },
     body: { direction: 'vertical', padding: '12px', vertical_spacing: 'large', elements: [
       { tag: 'markdown', content: `**[${escape(request.chatName)}](${chatAppLink(request.chatId, normalizeBrand(getBot(request.appId).config.brand))})**` },
@@ -77,7 +78,7 @@ export function buildGroupAccessCard(request: GroupAccessRequest, outcome?: 'app
 /** Invoked only by the bot-added event or a rejected, explicitly addressed human group message. */
 export async function requestGroupAccessConfirmation(
   appId: string, chatId: string, reason: 'joined' | 'mention', messageData?: unknown,
-  options?: { replay?: boolean; refreshCard?: boolean },
+  options?: { replay?: boolean; refreshCard?: boolean; addressedOwner?: boolean },
 ): Promise<void> {
   if (getBot(appId).config.groupAccessConfirmation !== true || groupOpen(appId, chatId)) return;
   const incomingRequester = humanRequester(messageData, chatId);
@@ -113,7 +114,10 @@ export async function requestGroupAccessConfirmation(
           request.requester = { ...candidate, name: profile?.name ?? candidate.name ?? '此人' };
         }
       }
-      if (request.messageData === undefined && options?.replay !== false) request.messageData = messageData;
+      if (request.messageData === undefined && options?.replay !== false) {
+        request.messageData = messageData;
+        if (options?.addressedOwner) request.addressedOwner = true;
+      }
     }
     // Persist before sending; retry an uncertain send with the same provider UUID.
     save(request);

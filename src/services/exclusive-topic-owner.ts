@@ -17,6 +17,8 @@ export interface TopicSelection extends TopicIdentity {
   selectedAt: number;
   selectionMessageId: string;
   protocol?: 'v2';
+  /** The primary owner explicitly delegated this topic to this bot. */
+  followupOwnerOpenId?: string;
 }
 
 export interface TopicExecutionOwner extends TopicIdentity {
@@ -32,10 +34,12 @@ export interface ExclusiveTopicInput extends TopicIdentity {
   createdAt: number;
   selectedAppId?: string;
   threadId?: string;
+  followupOwnerOpenId?: string;
 }
 
 export interface ExclusiveTopics {
   currentOwner(chatId: string, rootId: string): string | undefined;
+  currentSelection?(chatId: string, rootId: string): TopicSelection | undefined;
   select?(input: ExclusiveTopicInput): Promise<void>;
   admit(input: ExclusiveTopicInput, action: () => Promise<void>): Promise<boolean>;
 }
@@ -75,7 +79,8 @@ function readRecord<T extends TopicIdentity>(path: string, identity: TopicIdenti
 export function readTopicSelection(dataDir: string, identity: TopicIdentity): TopicSelection | undefined {
   const value = readRecord<TopicSelection>(topicFile(dataDir, identity, 'selection'), identity);
   if (value && (!Number.isSafeInteger(value.selectedAt) || value.selectedAt < 0
-    || typeof value.selectionMessageId !== 'string' || !value.selectionMessageId)) {
+    || typeof value.selectionMessageId !== 'string' || !value.selectionMessageId
+    || (value.followupOwnerOpenId !== undefined && !/^ou_[\w-]+$/.test(value.followupOwnerOpenId)))) {
     throw new Error('invalid exclusive topic selection');
   }
   return value;
@@ -116,6 +121,11 @@ export class ExclusiveTopicCoordinator implements ExclusiveTopics {
     return selection?.protocol === 'v2' ? selection.ownerAppId : undefined;
   }
 
+  currentSelection(chatId: string, rootId: string): TopicSelection | undefined {
+    const selection = readTopicSelection(this.options.dataDir, { chatId, rootId });
+    return selection?.protocol === 'v2' ? selection : undefined;
+  }
+
   private async publishSelection(input: ExclusiveTopicInput): Promise<void> {
     if (!input.selectedAppId || input.selectedAppId !== input.larkAppId) return;
     if (!Number.isSafeInteger(input.createdAt) || input.createdAt < 0 || !input.messageId) {
@@ -135,6 +145,9 @@ export class ExclusiveTopicCoordinator implements ExclusiveTopics {
         selectedAt: input.createdAt,
         selectionMessageId: input.messageId,
         protocol: 'v2',
+        ...(input.followupOwnerOpenId ? { followupOwnerOpenId: input.followupOwnerOpenId }
+          : previous?.ownerAppId === input.selectedAppId && previous.followupOwnerOpenId
+            ? { followupOwnerOpenId: previous.followupOwnerOpenId } : {}),
       };
       writeRecord(path, next);
     });

@@ -117,6 +117,7 @@ export interface ConfigFieldSpec {
  */
 export const CONFIG_FIELDS: readonly ConfigFieldSpec[] = [
   { key: 'groupAccessConfirmation', configKey: 'groupAccessConfirmation', kind: 'boolean', effect: 'immediate', clearable: false, hint: '入群或未授权成员 @ 时只向主 owner 私聊发全群开放确认卡；卡片和授权长期有效，确认后只开放该群对话权限' },
+  { key: 'ownerMentionFollowup', configKey: 'ownerMentionFollowup', kind: 'boolean', effect: 'immediate', clearable: false, hint: '本人指定的话题负责人接续真人 @本人；未授权者先私聊询问本人' },
   { key: 'groupMentionRequired', configKey: 'groupMentionRequired', kind: 'boolean', effect: 'immediate', clearable: false, hint: '群消息必须明确 @ 本 bot（默认 off）；on 时仅 mentionlessThreadChats 中的已有话题可免 @，一对一私聊保持免 @；话题归属和权限继续校验' },
   { key: 'mentionlessThreadChats', configKey: 'mentionlessThreadChats', kind: 'stringList', effect: 'immediate', clearable: true, parseList: raw => [...new Set(raw.split(/[\s,，]+/).filter(Boolean))], hint: '群消息强制 @ 的已有话题例外：精确 chat_id 列表（逗号/空格分隔）；仅话题内生效，群顶层仍须 @；unset 清空例外，不解除 groupMentionRequired' },
   { key: 'displayName', configKey: 'displayName', kind: 'string', effect: 'immediate', clearable: true, maxLen: 64, hint: '自定义展示名（dashboard 名册/会话列表用，≤64 字符）；不改飞书群内应用名；unset 回飞书名称' },

@@ -25,6 +25,17 @@ function deferred<T = void>() {
 }
 
 describe('durable exclusive topic admission', () => {
+  it('persists owner delegation for same-bot followups and drops it on a different selector', async () => {
+    const coordinator = new ExclusiveTopicCoordinator({ dataDir, revokeOtherBots: async () => {} });
+    await coordinator.select({ ...input('a', 1), followupOwnerOpenId: 'ou_owner' });
+    expect(coordinator.currentSelection(topic.chatId, topic.rootId)?.followupOwnerOpenId).toBe('ou_owner');
+    await coordinator.select(input('a', 2));
+    expect(coordinator.currentSelection(topic.chatId, topic.rootId)?.followupOwnerOpenId).toBe('ou_owner');
+    await coordinator.select(input('b', 3));
+    expect(coordinator.currentSelection(topic.chatId, topic.rootId)?.followupOwnerOpenId).toBeUndefined();
+    await coordinator.select({ ...input('b', 4), followupOwnerOpenId: 'ou_owner' });
+    expect(new ExclusiveTopicCoordinator({ dataDir, revokeOtherBots: async () => {} }).currentSelection(topic.chatId, topic.rootId)?.followupOwnerOpenId).toBe('ou_owner');
+  });
   it('keeps mentionless replies with the latest owner across coordinator restarts', async () => {
     const running = new Set<string>();
     const delivered: string[] = [];

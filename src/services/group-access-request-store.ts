@@ -22,6 +22,7 @@ export interface GroupAccessRequest {
   requester?: { openId: string; name: string; messageId: string };
   approvalScope?: 'group' | 'person';
   deliveredRequesterOpenId?: string;
+  addressedOwner?: boolean;
 }
 
 /** One durable decision per bot/group. Pending cards have no expiry. */

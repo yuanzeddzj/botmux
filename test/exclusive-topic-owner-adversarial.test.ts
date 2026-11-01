@@ -2,7 +2,14 @@ import { mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSyn
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync, type ChildProcess } from 'node:child_process';
-import * as childProcess from 'node:child_process';
+const nativeProcessProbe = vi.hoisted(() => ({ execFileSync: vi.fn() }));
+// Node's native ESM namespace is immutable. Give this race probe a mutable
+// Vitest export while all non-intercepted process operations remain real.
+vi.mock('node:child_process', async original => {
+  const actual = await original<typeof import('node:child_process')>();
+  nativeProcessProbe.execFileSync.mockImplementation(actual.execFileSync);
+  return { ...actual, execFileSync: nativeProcessProbe.execFileSync };
+});
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { spawnTsEval, spawnTsEvalWithRepoImports } from './helpers/ts-runner.js';
 
@@ -538,10 +545,10 @@ describe('exclusive owner adversarial execution probes', () => {
       root.stdout!.on('data', chunk => { if (String(chunk).includes('READY')) resolve(); });
     });
     const ds = session(root);
-    const actualExec = childProcess.execFileSync;
+    const actualExec = (await vi.importActual<typeof import('node:child_process')>('node:child_process')).execFileSync;
     let outsideChild = 0;
     let intercepted = false;
-    vi.spyOn(childProcess, 'execFileSync').mockImplementation(((command: any, args: any, options: any) => {
+    nativeProcessProbe.execFileSync.mockImplementation(((command: any, args: any, options: any) => {
       if (command !== 'busctl' || !args?.includes('StartTransientUnit') || intercepted) return actualExec(command, args, options);
       intercepted = true;
       root.send({ type: 'spawn-before-scope' });
