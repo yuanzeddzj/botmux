@@ -2,11 +2,12 @@ import { getBot, getOwnerOpenId } from '../bot-registry.js';
 import type { Session } from '../types.js';
 import type { DaemonSession } from './types.js';
 import { pickTurnReplyTarget, registryEntryProvesHumanSender } from './reply-target.js';
+type ProgressSession = Pick<Session, 'replyTargets' | 'currentReplyTarget' | 'quoteTargetId' | 'quoteTargetSenderOpenId'>;
 
 /** Only the real human sender of this exact turn determines its presentation.
  * The session owner and people mentioned by the sender are never substitutes.
  * Non-human scheduled/peer work retains its existing delivery policy. */
-export function nonOwnerHumanProgressSuppressed(appId: string, session: Session, turnId: string | undefined): boolean {
+export function nonOwnerHumanProgressSuppressed(appId: string, session: ProgressSession, turnId: string | undefined): boolean {
   if (!turnId) return false;
   try { if (getBot(appId).config.ownerOnlyProgress !== true) return false; }
   catch { return false; }
@@ -24,7 +25,7 @@ export function ownerOnlyProgressSuppressed(ds: DaemonSession, turnId?: string):
 }
 
 export function nonOwnerHumanSendSuppressed(
-  appId: string, session: Session, turnId: string | undefined, responseKind: 'progress' | 'final' | 'auxiliary',
+  appId: string, session: ProgressSession, turnId: string | undefined, responseKind: 'progress' | 'final' | 'auxiliary',
 ): boolean {
   return responseKind !== 'final' && nonOwnerHumanProgressSuppressed(appId, session, turnId);
 }

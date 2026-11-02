@@ -11786,7 +11786,7 @@ async function cmdSend(rest: string[]): Promise<void> {
 
   const { nonOwnerHumanSendSuppressed } = await import('./core/owner-only-progress.js');
   const presentationSource = originSession ?? s;
-  if (nonOwnerHumanSendSuppressed(presentationSource.larkAppId, presentationSource,
+  if (nonOwnerHumanSendSuppressed(presentationSource.larkAppId ?? appId, presentationSource,
     originSession ? originTurnId : currentTurnId, effectiveResponseKind)) {
     console.error('本轮仅发送最终答复；过程消息已省略。请使用 botmux send --response-kind final 发送答复。');
     console.log(JSON.stringify({ success: true, delivered: false, suppressed: true,
