@@ -178,6 +178,7 @@ import {
 } from './services/durable-lark-session-control.js';
 import { failedTurnCaller, recordLimitedFailedTurn, clearLimitedFailedTurn, recordFailedTurnTerminal, noteFailedTurnRecoveryInput } from './core/failed-turn-recovery.js';
 import { isSilentScheduledTurn } from './core/silent-schedule-turns.js';
+import { ownerOnlyProgressSuppressed } from './core/owner-only-progress.js';
 import * as chatFirstSeenStore from './services/chat-first-seen-store.js';
 import { ensureDefaultOncallBound } from './services/oncall-store.js';
 import * as scheduleStore from './services/schedule-store.js';
@@ -4095,6 +4096,7 @@ function startMemoryDiagnostics(): ReturnType<typeof setInterval> | undefined {
  * address spaces never collide; the lookup just tries both.
  */
 function streamingCardDisabledFor(ds: DaemonSession, turnId?: string): boolean {
+  if (ownerOnlyProgressSuppressed(ds, turnId)) return true;
   if (privateReplyEnabled(ds.session)) return true;
   if (ds.streamingCardForced) return false;
   try {
@@ -4151,6 +4153,7 @@ export async function noteTurnReceived(
   if (triggerUserAuthEnabledFor(ds)) {
     await refreshTurnCliIdentity(ds, _turnId ?? triggerMessageId);
   }
+  if (ownerOnlyProgressSuppressed(ds, _turnId ?? triggerMessageId)) return;
   // Replaces the old 「处理中」 placeholder card. That card existed only to be
   // PATCHed with the final answer, and `im.v1.message.patch` is silent (no Feishu
   // notification / unread) — so card-off answers could land unseen. The
@@ -31410,6 +31413,7 @@ export async function startDaemon(botIndex?: number): Promise<void> {
         if (context.status === 'limited') recordLimitedFailedTurn(ds, context.turnId);
         else if (context.prevStatus === 'limited') clearLimitedFailedTurn(ds);
       } catch (error) { logger.error(`[recovery] quota snapshot failed: ${String(error)}`); }
+      if (ownerOnlyProgressSuppressed(ds, context.turnId)) return;
       return cardRuntimeStatusBridge.publish({
         sessionId: ds.session.sessionId,
         larkAppId: ds.larkAppId,

@@ -8341,6 +8341,7 @@ ipcRoute('GET', '/api/bot-default-oncall', requireBoundBot(async (_req, res) => 
     groupMentionRequired: getBot(cachedLarkAppId).config.groupMentionRequired === true,
     groupAccessConfirmation: getBot(cachedLarkAppId).config.groupAccessConfirmation === true,
     ownerMentionFollowup: getBot(cachedLarkAppId).config.ownerMentionFollowup === true,
+    ownerOnlyProgress: getBot(cachedLarkAppId).config.ownerOnlyProgress === true,
     mentionlessThreadChats: getBot(cachedLarkAppId).config.mentionlessThreadChats ?? [],
     quotaFallbackBot: (() => {
       try { return getBot(cachedLarkAppId).config.quotaFallbackBot ?? null; }
@@ -10667,6 +10668,22 @@ ipcRoute('GET', '/api/bot-group-mention-policy', requireBoundBot((_req, res) => 
   jsonRes(res, 200, { ok: true, groupMentionRequired: cfg.groupMentionRequired === true,
     mentionlessThreadChats: cfg.mentionlessThreadChats ?? [] });
 }));
+ipcRoute('PUT', '/api/bot-owner-only-progress', requireBoundBot(async (req, res) => {
+  const body = await readJsonBodyOrBadJson<unknown>(req, res);
+  if (body === BAD_JSON) return;
+  if (!body || typeof body !== 'object' || Array.isArray(body)
+    || typeof (body as { ownerOnlyProgress?: unknown }).ownerOnlyProgress !== 'boolean') {
+    return jsonRes(res, 400, { ok: false, error: 'invalid_boolean' });
+  }
+  const value = (body as { ownerOnlyProgress: boolean }).ownerOnlyProgress;
+  const result = await rmwBotEntry(cachedLarkAppId, entry => {
+    entry.ownerOnlyProgress = value; return { write: true, result: null };
+  });
+  if (!result.ok) return jsonRes(res, 400, { ok: false, error: result.reason });
+  getBot(cachedLarkAppId).config.ownerOnlyProgress = value || undefined;
+  jsonRes(res, 200, { ok: true, ownerOnlyProgress: value });
+}));
+
 ipcRoute('PUT', '/api/bot-owner-mention-followup', requireBoundBot(async (req, res) => {
   const body = await readJsonBodyOrBadJson<unknown>(req, res);
   if (body === BAD_JSON) return;

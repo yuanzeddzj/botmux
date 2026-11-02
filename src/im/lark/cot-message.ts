@@ -45,6 +45,7 @@ import { getBot, getBotClient } from '../../bot-registry.js';
 import { boundSubjectForTitle, subjectFromArgsString, type ToolSubject } from '../../services/cot-subject.js';
 import { fallbackTurnId, frozenReplyContextForTurn } from '../../core/reply-target.js';
 import { isSilentScheduledTurn } from '../../core/silent-schedule-turns.js';
+import { ownerOnlyProgressSuppressed } from '../../core/owner-only-progress.js';
 import { pendingStartingCardPublication } from '../../core/starting-card-publication.js';
 import { TopicSendError } from '../../cli/topic-send-guard.js';
 import { privateReplyEnabled } from '../../core/private-reply.js';
@@ -722,6 +723,7 @@ export function handleCotThinkingUpdate(
   // Thinking bubbles are outbound messages too. Keep silent fires quiet even
   // when /cot show is armed, without suppressing another turn in this session.
   if (isSilentScheduledTurn(ds, msg.turnId) || ds.session.hiddenThinkingTurns?.includes(msg.turnId)) return false;
+  if (ownerOnlyProgressSuppressed(ds, msg.turnId)) return false;
   if (!cotEnabled(ds)) return false;
   const key = turnKeyOf(msg);
   let state = states.get(ds);

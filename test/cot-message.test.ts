@@ -14,6 +14,7 @@ const request = vi.fn();
 vi.mock('../src/bot-registry.js', () => ({
   getBot: vi.fn(() => ({ config: { cotEnabled: true } })),
   getBotClient: vi.fn(() => ({ request })),
+  getOwnerOpenId: vi.fn(() => 'ou_owner'),
 }));
 
 import { mkdtempSync, existsSync, readdirSync, rmSync, mkdirSync, writeFileSync } from 'node:fs';
@@ -653,6 +654,20 @@ describe('handleCotThinkingUpdate', () => {
     // Default ON: a bot that never touched the field streams CoT.
     vi.mocked(getBot).mockReturnValue({ config: {} } as any);
     expect(handleCotThinkingUpdate(ds, upd([think('x')]))).toBe(true);
+  });
+
+  it('only the owner receives native thinking, even when a guest @mentions the owner or forces cot on', async () => {
+    vi.mocked(getBot).mockReturnValue({ config: { cotEnabled: true, ownerOnlyProgress: true } } as any);
+    const ds = makeDs({ cotForced: true, session: { replyTargets: {
+      om_guest: { senderOpenId: 'ou_guest', participants: [{ openId: 'ou_guest', isBot: false }, { openId: 'ou_owner', isBot: false }], updatedAt: '2026-11-02' },
+      om_owner: { senderOpenId: 'ou_owner', participants: [{ openId: 'ou_owner', isBot: false }], updatedAt: '2026-11-02' },
+    } } });
+    expect(handleCotThinkingUpdate(ds, upd([think('guest step')], 'om_guest'))).toBe(false);
+    expect(request).not.toHaveBeenCalled();
+    expect(handleCotThinkingUpdate(ds, upd([think('owner step')], 'om_owner'))).toBe(true);
+    await flush();
+    expect(request.mock.calls.some(([r]) => r.url === '/open-apis/im/v1/message_cot')).toBe(true);
+    expect(handleCotThinkingUpdate(ds, upd([think('guest late')], 'om_guest'))).toBe(false);
   });
 
   it('cotForced (/cot show) overrides both switches for the session, but never apiOnly', () => {

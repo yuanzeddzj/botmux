@@ -14,6 +14,14 @@ import { enforceFinalLinkIntegrity } from '../../src/services/final-link-integri
 // uploadFile still asks fs for bytes, but this fixture only needs to exercise
 // routing and captures the resulting file message rather than uploading 512MiB.
 const stubbedLargeUpload = process.env.BOTMUX_TEST_STUB_LARGE_FILE_UPLOAD;
+if (process.env.BOTMUX_TEST_DENY_BOTS_CONFIG === '1') {
+  const actualRead = fs.readFileSync.bind(fs);
+  fs.readFileSync = ((path: fs.PathOrFileDescriptor, options?: unknown) => {
+    if (String(path) === process.env.BOTS_CONFIG) throw Object.assign(new Error('isolated configuration'), { code: 'EACCES' });
+    return actualRead(path, options as never);
+  }) as typeof fs.readFileSync;
+  syncBuiltinESMExports();
+}
 if (stubbedLargeUpload) {
   const originalReadFileSync = fs.readFileSync.bind(fs);
   fs.readFileSync = ((path: fs.PathOrFileDescriptor, options?: unknown) => {

@@ -88,6 +88,26 @@ describe('two-phase turn reactions', () => {
     mocks.removeReaction.mockResolvedValue(undefined);
   });
 
+  it('guest acceptance has no emoji while owner acceptance and owner completion remain visible in the same topic', async () => {
+    registerWith(true); getBot(APP).config.ownerOnlyProgress = true;
+    const ds = makeDs();
+    ds.session.replyTargets = {
+      om_guest: { senderOpenId: 'ou_guest', participants: [{ openId: 'ou_guest', isBot: false }], updatedAt: '2026-11-02' },
+      om_owner: { senderOpenId: 'ou_o', participants: [{ openId: 'ou_o', isBot: false }], updatedAt: '2026-11-02' },
+    };
+    await noteTurnReceived(ds, 'om_guest'); await noteTurnReceived(ds, 'om_owner'); await finishTurnReactions(ds);
+    expect(mocks.addReaction.mock.calls.map(c => [c[1], c[2]])).toEqual([['om_owner', 'GoGoGo'], ['om_owner', 'DONE']]);
+  });
+
+  it('an already-added guest reaction is removed without adding DONE after owner-only presentation is enabled', async () => {
+    registerWith(true);
+    const ds = makeDs(); ds.session.replyTargets = { om_guest: { senderOpenId: 'ou_guest',
+      participants: [{ openId: 'ou_guest', isBot: false }], updatedAt: '2026-11-02' } };
+    await noteTurnReceived(ds, 'om_guest'); getBot(APP).config.ownerOnlyProgress = true; await finishTurnReactions(ds);
+    expect(mocks.removeReaction).toHaveBeenCalledWith(APP, 'om_guest', 'rid_om_guest');
+    expect(mocks.addReaction).toHaveBeenCalledTimes(1);
+  });
+
   it('streaming card on (default): no reaction on receipt', async () => {
     registerWith(false);
     const ds = makeDs();

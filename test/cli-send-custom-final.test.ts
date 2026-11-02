@@ -13,6 +13,7 @@ import { buildTurnTerminalFooterPatch } from '../src/im/lark/card-builder.js';
 import { customFinalCardError } from '../src/im/lark/final-card-sections.js';
 import { extractCardContent } from '../src/im/lark/message-parser.js';
 import { normalizeCompletionProposalInput } from '../src/core/completion-proposal.js';
+import { sendCredFilePath } from '../src/adapters/cli/read-isolation.js';
 
 const fixture = fileURLToPath(new URL('./fixtures/send-reply-card-capture.ts', import.meta.url));
 const key = { larkAppId: 'cli_test', sessionId: 'sid_custom_final', turnId: 'om_turn' };
@@ -35,7 +36,7 @@ function captured(stdout: unknown): any[] {
   return String(stdout).split('\n').filter(line => line.startsWith('CAPTURE_REPLY='))
     .map(line => JSON.parse(line.slice('CAPTURE_REPLY='.length)));
 }
-function setup(cliId = 'codex', feedback = true, scope = 'thread', chatType = 'group') {
+function setup(cliId = 'codex', feedback = true, scope = 'thread', chatType = 'group', ownerOnlyProgress = false, isolatedConfig = false) {
   const root = mkdtempSync(join(tmpdir(), 'botmux-custom-final-'));
   const dataDir = join(root, 'data');
   mkdirSync(join(dataDir, '.botmux-cli-pids'), { recursive: true });
@@ -45,7 +46,13 @@ function setup(cliId = 'codex', feedback = true, scope = 'thread', chatType = 'g
   writeFileSync(join(root, 'bots.json'), JSON.stringify([{
     larkAppId: key.larkAppId, larkAppSecret: 'test-secret', cliId, replyCardMode: 'unified',
     brandLabel: 'Example assistant', feedback: { enabled: feedback, audience: 'requester' },
+    ...(ownerOnlyProgress ? { ownerOnlyProgress: true, allowedUsers: ['ou_owner'] } : {}),
   }]));
+  if (isolatedConfig) {
+    const path = sendCredFilePath(dataDir, key.larkAppId);
+    mkdirSync(join(root, 'bots', key.larkAppId), { recursive: true });
+    writeFileSync(path, JSON.stringify({ larkAppSecret: 'test-secret', ownerOnlyProgress: true, primaryOwnerOpenId: 'ou_owner' }));
+  }
   seedPersistedSessionRows(dataDir, key.larkAppId, { [key.sessionId]: {
     sessionId: key.sessionId, status: 'active', cliId, cliSessionId: 'native_custom',
     larkAppId: key.larkAppId, chatId: 'oc_test', rootMessageId: 'om_root', scope, chatType,
@@ -59,12 +66,39 @@ function setup(cliId = 'codex', feedback = true, scope = 'thread', chatType = 'g
       cwd: fileURLToPath(new URL('..', import.meta.url)),
       env: { PATH: process.env.PATH, HOME: root, SESSION_DATA_DIR: dataDir, BOTS_CONFIG: join(root, 'bots.json'),
         BOTMUX_SESSION_ID: key.sessionId, BOTMUX_TURN_ID: key.turnId, BOTMUX_LARK_APP_ID: key.larkAppId },
+      ...(isolatedConfig ? { env: { PATH: process.env.PATH, HOME: root, SESSION_DATA_DIR: dataDir, BOTS_CONFIG: join(root, 'bots.json'),
+        BOTMUX_SESSION_ID: key.sessionId, BOTMUX_TURN_ID: key.turnId, BOTMUX_LARK_APP_ID: key.larkAppId, BOTMUX_TEST_DENY_BOTS_CONFIG: '1' } } : {}),
       encoding: 'utf8', timeout: 30_000,
     });
   return { root, dataDir, run };
 }
 
 describe('custom schema-2 final uses the canonical reply lifecycle', () => {
+  it.each(['progress', 'auxiliary'])('a guest %s send has no provider effect and does not consume the final answer', kind => {
+    const { root, run } = setup('traex', false, 'thread', 'group', true);
+    try {
+      const progress = run(customCard, kind);
+      expect(progress.status, String(progress.stderr)).toBe(0);
+      expect(captured(progress.stdout)).toEqual([]);
+      expect(String(progress.stdout)).toContain('"delivered":false');
+      expect(String(progress.stdout)).toContain('"reason":"non_owner_progress"');
+      const final = run(customCard, 'final');
+      expect(final.status, String(final.stderr)).toBe(0);
+      expect(captured(final.stdout)).toHaveLength(1);
+      expect(captured(final.stdout)[0].body.msg_type).toBe('interactive');
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+  it('isolated credentials retain owner-only presentation when the full bots configuration is unreadable', () => {
+    const { root, run } = setup('traex', false, 'thread', 'group', true, true);
+    try {
+      const progress = run(customCard, 'progress');
+      expect(progress.status, String(progress.stderr)).toBe(0);
+      expect(captured(progress.stdout)).toEqual([]);
+      expect(String(progress.stdout)).toContain('"reason":"non_owner_progress"');
+      const final = run(customCard, 'final');
+      expect(final.status, String(final.stderr)).toBe(0); expect(captured(final.stdout)).toHaveLength(1);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
   it.each([
     { cliId: 'codex', feedback: true, reserved: false, scope: 'thread', chatType: 'group' },
     { cliId: 'claude-code', feedback: false, reserved: false, scope: 'chat', chatType: 'group' },

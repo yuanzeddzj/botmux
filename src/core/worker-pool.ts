@@ -820,6 +820,7 @@ import { parseVcMeetingListenerOutput } from '../services/vc-meeting-listener-ou
 import { isLocalCliOpenEnabled, isLocalCliOpenReady } from '../services/local-cli-opener.js';
 import { sessionConfiguredRuntimeDisplayName } from './cli-runtime-display.js';
 import { armSilentScheduledTurn, disarmSilentScheduledTurn, isSilentScheduledTurn } from './silent-schedule-turns.js';
+import { ownerOnlyProgressSuppressed } from './owner-only-progress.js';
 import {
   mintScheduledContinuationTurnId,
   parseScheduledTurnId,
@@ -1547,6 +1548,7 @@ export function isResumeRecoveryPlaceholder(ds: DaemonSession): boolean {
 // per-session via `ds.streamingCardForced` (manually summon a live card).
 function streamingCardDisabled(ds: DaemonSession, turnId?: string): boolean {
   if (privateReplyEnabled(ds.session)) return true;
+  if (ownerOnlyProgressSuppressed(ds, turnId)) return true;
   if (isDocNativeSession(ds) || handoffCardBlocksStreaming(ds, turnId)) return true;
   if (ds.streamingCardForced) return false;
   try {
@@ -4088,6 +4090,7 @@ export function managedAuxUiSuppressedFor(
   } catch {
     return true;
   }
+  if (ownerOnlyProgressSuppressed(ds, turnId)) return true;
   if (isSilentScheduledTurn(ds, turnId)) return true;
   if (isMeetingDrivenTurn(ds, turnId, dispatchAttempt)) return true;
   const armedThrough = turnId ? ds.suppressedFinalOutputTurns?.get(turnId) : undefined;
@@ -15384,6 +15387,8 @@ export function forkWorker(
     })(),
     solo: ds.soloSession === true,
     feedback: feedbackPolicy,
+    ownerOnlyProgress: botCfg.ownerOnlyProgress,
+    primaryOwnerOpenId: getOwnerOpenId(ds.larkAppId),
     terminalCardEpoch: ds.session.terminalCardEpoch,
     // Freeze the ACTUAL loaded bots-config path (getLoadedConfigPath) so a
     // no-transport worker's fs-policy denies it from a HOST-owned fact, not a
@@ -15878,6 +15883,7 @@ function setupWorkerHandlers(
     // → updateMessage would still dial Feishu). Dashboard/web-terminal state is
     // still updated before these guards, so the terminal view is unaffected.
     if (!larkTransportEnabled({ chatId: ds.chatId, apiOnly: getBot(ds.larkAppId).config.apiOnly })) return true;
+    if (ownerOnlyProgressSuppressed(ds, turnId)) return true;
     if (isSilentScheduledTurn(ds, turnId)) return true;
     // Plan B: a VC meeting agent is an ordinary chat-scope session, so the live
     // STREAMING CARD is no longer gated here at all — it surfaces through the
@@ -20904,7 +20910,7 @@ async function finishTurnReactions(ds: DaemonSession): Promise<void> {
         logger.debug(`[reaction] failed to remove received reaction ${ack.reactionId}: ${err?.message ?? err}`);
       }
     }
-    if (silent) continue;
+    if (silent || ownerOnlyProgressSuppressed(ds, ack.messageId)) continue;
     try {
       await addReaction(ds.larkAppId, ack.messageId, doneEmoji);
     } catch (err: any) {

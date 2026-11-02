@@ -10038,7 +10038,8 @@ async function registerSelfFromCredFile(): Promise<void> {
   const sd = process.env.SESSION_DATA_DIR;
   if (!appId || !sd) return;
   const { sendCredFilePath } = await import('./adapters/cli/read-isolation.js');
-  let cred: { larkAppSecret?: string; brand?: string; apiOnly?: boolean; feedback?: import('./services/feedback-policy.js').FeedbackPolicyInput };
+  let cred: { larkAppSecret?: string; brand?: string; apiOnly?: boolean; feedback?: import('./services/feedback-policy.js').FeedbackPolicyInput;
+    ownerOnlyProgress?: boolean; primaryOwnerOpenId?: string };
   try {
     // send-cred lives in the bot's BOT_HOME (<BOTMUX_HOME>/bots/<appId>/send-cred.json);
     // sendCredFilePath takes SESSION_DATA_DIR and derives BOTMUX_HOME (its parent).
@@ -10059,6 +10060,8 @@ async function registerSelfFromCredFile(): Promise<void> {
     cliId: 'claude-code',
     brand: cred.brand as 'feishu' | 'lark' | undefined,
     feedback: cred.feedback,
+    ownerOnlyProgress: cred.ownerOnlyProgress,
+    ...(cred.primaryOwnerOpenId ? { allowedUsers: [cred.primaryOwnerOpenId] } : {}),
     replyStyle: resolveReplyStyleConfig(appId),
     ...resolveReplyFooterPreferences(appId),
     usageDisplay:
@@ -11780,6 +11783,16 @@ async function cmdSend(rest: string[]): Promise<void> {
   const { registerBot, loadBotConfigs, findOncallChatForAnyBot, getBot } = await import('./bot-registry.js');
   try { for (const cfg of loadBotConfigs()) registerBot(cfg); } catch { /* */ }
   if (envPinnedRiffBot) { try { registerBot(envPinnedRiffBot); } catch { /* */ } }
+
+  const { nonOwnerHumanSendSuppressed } = await import('./core/owner-only-progress.js');
+  const presentationSource = originSession ?? s;
+  if (nonOwnerHumanSendSuppressed(presentationSource.larkAppId, presentationSource,
+    originSession ? originTurnId : currentTurnId, effectiveResponseKind)) {
+    console.error('本轮仅发送最终答复；过程消息已省略。请使用 botmux send --response-kind final 发送答复。');
+    console.log(JSON.stringify({ success: true, delivered: false, suppressed: true,
+      reason: 'non_owner_progress', sessionId: sid, turnId: currentTurnId }));
+    return;
+  }
 
   const { getMessageDetail: getTopicMessageDetail } = await import('./im/lark/client.js');
   const lookupTopic: TopicMessageLookup = (app, id) =>

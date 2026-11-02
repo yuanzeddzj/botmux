@@ -2463,6 +2463,9 @@ export interface BotConfig {
   /** The bot selected by the primary owner may handle human @owner replies
    * inside that topic; the sender must still pass ordinary talk permission. */
   ownerMentionFollowup?: boolean;
+  /** Human turns from other people publish only their final answer; primary
+   * owner turns retain reactions and progress/thinking presentation. */
+  ownerOnlyProgress?: boolean;
   /** Exact group IDs where existing native threads may continue without @.
    * This is not a grant; permissions and exclusive topic ownership still apply. */
   mentionlessThreadChats?: string[];
@@ -4483,6 +4486,7 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
       groupMentionRequired: entry.groupMentionRequired === true || undefined,
       groupAccessConfirmation: entry.groupAccessConfirmation === true || undefined,
       ownerMentionFollowup: entry.ownerMentionFollowup === true || undefined,
+      ownerOnlyProgress: entry.ownerOnlyProgress === true || undefined,
       mentionlessThreadChats: entry.mentionlessThreadChats === undefined
         ? undefined : [...new Set(normalizeStringList(entry.mentionlessThreadChats))],
       soloGroupMentionBypass: entry.soloGroupMentionBypass === false ? false : undefined,

@@ -78,6 +78,7 @@ vi.mock('../src/bot-registry.js', () => ({
   getAllBots: vi.fn(() => []),
   normalizeUsageDisplay: vi.fn(() => 'off'),
   getBotClient: vi.fn(() => ({ request: cotRequest })),
+  getOwnerOpenId: vi.fn(() => 'ou_owner'),
 }));
 
 vi.mock('../src/config.js', () => ({
@@ -1957,6 +1958,26 @@ describe('screenshot_uploaded: turn-exact target and source isolation', () => {
     });
     await flush();
     expect(meeting.currentImageKey).toBeUndefined();
+  });
+
+  it('other human turns still run and cache thinking without publishing it; the owner retains thinking in the same session', async () => {
+    getBotMock.mockReturnValue({ config: { larkAppId: 'app_test', cliId: 'claude-code', cotEnabled: true,
+      ownerOnlyProgress: true, disableStreamingCard: true } });
+    const worker = makeFakeWorker(), ds = makeDs({ worker, workerReady: true, workerPort: 9999 });
+    ds.session.replyTargets = {
+      om_guest: { senderOpenId: 'ou_guest', participants: [{ openId: 'ou_guest', isBot: false }], updatedAt: '2026-11-02' },
+      om_owner: { senderOpenId: 'ou_owner', participants: [{ openId: 'ou_owner', isBot: false }], updatedAt: '2026-11-02' },
+    };
+    setupActiveWorkerHandlers(ds, worker);
+    expect(managedAuxUiSuppressedFor(ds, 'om_guest')).toBe(true);
+    expect(managedAuxUiSuppressedFor(ds, 'om_owner')).toBe(false);
+    worker.emit('message', { type: 'thinking_update', sessionId: ds.session.sessionId, turnId: 'om_guest', entries: [{ kind: 'thinking', text: 'guest analysis' }] });
+    await flush();
+    expect(ds.lastThinkingUpdate?.turnId).toBe('om_guest');
+    expect(cotRequest).not.toHaveBeenCalled(); expect(sessionReplyMock).not.toHaveBeenCalled();
+    worker.emit('message', { type: 'thinking_update', sessionId: ds.session.sessionId, turnId: 'om_owner', entries: [{ kind: 'thinking', text: 'owner analysis' }] });
+    await flush();
+    expect(cotRequest.mock.calls.some(([r]) => r.url === '/open-apis/im/v1/message_cot')).toBe(true);
   });
 
   it('records the publication proof when worker-ready POSTs a fresh card', async () => {

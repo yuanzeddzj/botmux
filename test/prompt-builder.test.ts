@@ -799,6 +799,18 @@ describe('buildReforkCliInput', () => {
 // ─── renderSenderTag — <sender> attribute rendering / XML escape ────────────
 
 describe('renderSenderTag', () => {
+  it('instructs other human senders to send only a final answer while retaining ordinary owner prompts', async () => {
+    const { getOwnerOpenId } = await import('../src/bot-registry.js');
+    vi.mocked(getOwnerOpenId).mockReturnValue('ou_owner');
+    mockBotConfig.ownerOnlyProgress = true;
+    try {
+      expect(renderSenderTag({ openId: 'ou_guest', type: 'user' }, 'app_test')).toContain('botmux send --response-kind final');
+      expect(renderSenderTag({ openId: 'ou_owner', type: 'user' }, 'app_test')).not.toContain('response_presentation');
+      expect(renderSenderTag({ openId: 'ou_peer', type: 'bot' }, 'app_test')).not.toContain('response_presentation');
+      mockBotConfig.senderTag = false;
+      expect(renderSenderTag({ openId: 'ou_guest', type: 'user' }, 'app_test')).toContain('response_presentation');
+    } finally { delete mockBotConfig.ownerOnlyProgress; delete mockBotConfig.senderTag; vi.mocked(getOwnerOpenId).mockReturnValue(undefined); }
+  });
   it('returns empty string when sender is undefined or has no openId', () => {
     expect(renderSenderTag()).toBe('');
     expect(renderSenderTag({ openId: '', type: 'user' })).toBe('');

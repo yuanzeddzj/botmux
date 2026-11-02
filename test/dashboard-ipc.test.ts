@@ -225,7 +225,7 @@ afterEach(async () => {
 });
 
 describe('dashboard IPC server', () => {
-  it.each(['groupAccessConfirmation', 'ownerMentionFollowup'] as const)('updates %s on an Auto MAX pool without rewriting models or permissions', async key => {
+  it.each(['groupAccessConfirmation', 'ownerMentionFollowup', 'ownerOnlyProgress'] as const)('updates %s on an Auto MAX pool without rewriting models or permissions', async key => {
     const dir = mkdtempSync(join(tmpdir(), 'group-access-ipc-'));
     const path = join(dir, 'bots.json'), previous = process.env.BOTS_CONFIG;
     const fixture = { larkAppId: 'cli_group_access_ipc', larkAppSecret: 'fixture', cliId: 'traex',
@@ -238,7 +238,7 @@ describe('dashboard IPC server', () => {
       process.env.BOTS_CONFIG = path; writeFileSync(path, JSON.stringify([fixture]));
       loadBotConfigs().forEach(registerBot); setLarkAppId(fixture.larkAppId); setIpcAuthSecret(TEST_IPC_SECRET);
       handle = await startIpcServer({ port: 0, host: '127.0.0.1', authRequired: true });
-      const route = key === 'ownerMentionFollowup' ? '/api/bot-owner-mention-followup' : '/api/bot-group-access-confirmation', base = `http://127.0.0.1:${handle.port}`;
+      const route = key === 'ownerOnlyProgress' ? '/api/bot-owner-only-progress' : key === 'ownerMentionFollowup' ? '/api/bot-owner-mention-followup' : '/api/bot-group-access-confirmation', base = `http://127.0.0.1:${handle.port}`;
       const put = (body: unknown, auth = true) => fetch(base + route, { method: 'PUT',
         headers: { ...(auth ? trustedHostHeaders('PUT', route, handle!.port) : {}), 'content-type': 'application/json' }, body: JSON.stringify(body) });
       expect((await put({ [key]: true }, false)).status).toBe(401);

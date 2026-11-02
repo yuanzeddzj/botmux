@@ -848,12 +848,22 @@ function senderTagOptions(larkAppId: string): { enabled: boolean; hideEmail: boo
  */
 export function renderSenderTag(sender?: ResolvedSender, larkAppId?: string): string {
   if (!sender || !sender.openId) return '';
+  let presentation = '';
+  if (larkAppId && sender.type === 'user') {
+    try {
+      if (getBot(larkAppId).config.ownerOnlyProgress === true && sender.openId !== getOwnerOpenId(larkAppId)) {
+        presentation = '<response_presentation>Process this request without commentary or intermediate messages. '
+          + 'Send only the final answer using botmux send --response-kind final. '
+          + 'If clarification is necessary, ask it as the final reply; do not post working/completed receipts.</response_presentation>';
+      }
+    } catch { /* bot context unavailable */ }
+  }
   const options = larkAppId ? senderTagOptions(larkAppId) : { enabled: true, hideEmail: false };
-  if (!options.enabled) return '';
+  if (!options.enabled) return presentation;
   const attrs: string[] = [`type="${xmlEscape(sender.type)}"`, `open_id="${xmlEscape(sender.openId)}"`];
   if (sender.name) attrs.push(`name="${xmlEscape(sender.name)}"`);
   if (sender.email && !options.hideEmail) attrs.push(`email="${xmlEscape(sender.email)}"`);
-  return `<sender ${attrs.join(' ')} />`;
+  return [`<sender ${attrs.join(' ')} />`, presentation].filter(Boolean).join('\n');
 }
 
 /**
