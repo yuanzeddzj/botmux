@@ -777,13 +777,16 @@ export async function sendUserMessage(
   content: string,
   msgType: string = 'text',
   uuid?: string,
-  requestOptions?: LarkRequestOptions,
+  requestOptions?: LarkRequestOptions & Pick<OutboundMessageOptions, 'beforeWrite'>,
 ): Promise<string> {
   assertLarkTransport(larkAppId, 'sendUserMessage');
   return executeWithLarkGate(
     larkAppId,
     'sendUserMessage',
     async () => {
+      // The gate may wait for capacity or retry. Revalidate at every actual
+      // provider request, rather than only when the caller queued the send.
+      if (requestOptions?.beforeWrite) await requestOptions.beforeWrite(createTopicMessageLookupCache(lookupWriteTopic).lookup);
       const c = getBotClient(larkAppId);
       // Stamp callback-button ownership markers on interactive DMs too: this is the
       // FIFTH card egress surface (config / write-link / substitute / overload / …
@@ -1332,12 +1335,12 @@ export async function deleteEphemeralCard(larkAppId: string, messageId: string):
 
 export interface MessageUpdateAcknowledgement { update_time?: string | number }
 export function updateMessage(larkAppId: string, messageId: string, cardJson: string): Promise<void>;
-export function updateMessage(larkAppId: string, messageId: string, cardJson: string, options: Pick<OutboundMessageOptions, 'beforeWrite'>): Promise<void>;
+export function updateMessage(larkAppId: string, messageId: string, cardJson: string, options: (Pick<OutboundMessageOptions, 'beforeWrite'> & LarkRequestOptions)): Promise<void>;
 export function updateMessage(larkAppId: string, messageId: string, cardJson: string, returnAcknowledgement: true): Promise<MessageUpdateAcknowledgement | undefined>;
-export function updateMessage(larkAppId: string, messageId: string, cardJson: string, options: Pick<OutboundMessageOptions, 'beforeWrite'> & { returnAcknowledgement: true }): Promise<MessageUpdateAcknowledgement | undefined>;
+export function updateMessage(larkAppId: string, messageId: string, cardJson: string, options: (Pick<OutboundMessageOptions, 'beforeWrite'> & LarkRequestOptions) & { returnAcknowledgement: true }): Promise<MessageUpdateAcknowledgement | undefined>;
 export async function updateMessage(
   larkAppId: string, messageId: string, cardJson: string,
-  optionsOrAck: (Pick<OutboundMessageOptions, 'beforeWrite'> & { returnAcknowledgement?: boolean }) | boolean = {},
+  optionsOrAck: ((Pick<OutboundMessageOptions, 'beforeWrite'> & LarkRequestOptions) & { returnAcknowledgement?: boolean }) | boolean = {},
 ): Promise<MessageUpdateAcknowledgement | void> {
   const beforeWrite = typeof optionsOrAck === 'object' ? optionsOrAck.beforeWrite : undefined;
   const returnAcknowledgement = optionsOrAck === true || (typeof optionsOrAck === 'object' && optionsOrAck.returnAcknowledgement === true);
@@ -1349,10 +1352,11 @@ export async function updateMessage(
     const c = getBotClient(larkAppId);
     let res: any;
     try {
-      res = await c.im.v1.message.patch({
-        path: { message_id: messageId },
-        data: { content: stampBotmuxCallbackMarkers(cardJson) },
-      });
+      const deadline = typeof optionsOrAck === 'object' ? optionsOrAck : undefined;
+      const data = { content: stampBotmuxCallbackMarkers(cardJson) };
+      res = deadline?.timeoutMs ? await c.request({ method: 'PATCH',
+        url: '/open-apis/im/v1/messages/' + encodeURIComponent(messageId), data, ...larkRequestDeadline(deadline) })
+        : await c.im.v1.message.patch({ path: { message_id: messageId }, data });
     } catch (err: any) {
       const code = getLarkErrorCode(err);
       if (code === LARK_CODE_MESSAGE_WITHDRAWN) {

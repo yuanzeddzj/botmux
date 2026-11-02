@@ -855,6 +855,10 @@ export function renderSenderTag(sender?: ResolvedSender, larkAppId?: string): st
         presentation = '<response_presentation>Process this request without commentary or intermediate messages. '
           + 'Send only the final answer using botmux send --response-kind final. '
           + 'If clarification is necessary, ask it as the final reply; do not post working/completed receipts.</response_presentation>';
+      } else if (getBot(larkAppId).config.ownerProgressToDm === true && sender.openId === getOwnerOpenId(larkAppId)) {
+        presentation = '<response_presentation>For a group request, the daemon privately displays your thinking and text progress. '
+          + 'Send the answer and its attachments using botmux send --response-kind final so they return to the original conversation. '
+          + 'Optional text progress uses --response-kind progress; do not manually create a second private progress card.</response_presentation>';
       }
     } catch { /* bot context unavailable */ }
   }

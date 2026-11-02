@@ -36,7 +36,7 @@ function captured(stdout: unknown): any[] {
   return String(stdout).split('\n').filter(line => line.startsWith('CAPTURE_REPLY='))
     .map(line => JSON.parse(line.slice('CAPTURE_REPLY='.length)));
 }
-function setup(cliId = 'codex', feedback = true, scope = 'thread', chatType = 'group', ownerOnlyProgress = false, isolatedConfig = false) {
+function setup(cliId = 'codex', feedback = true, scope = 'thread', chatType = 'group', ownerOnlyProgress = false, isolatedConfig = false, ownerProgressToDm = false) {
   const root = mkdtempSync(join(tmpdir(), 'botmux-custom-final-'));
   const dataDir = join(root, 'data');
   mkdirSync(join(dataDir, '.botmux-cli-pids'), { recursive: true });
@@ -46,12 +46,13 @@ function setup(cliId = 'codex', feedback = true, scope = 'thread', chatType = 'g
   writeFileSync(join(root, 'bots.json'), JSON.stringify([{
     larkAppId: key.larkAppId, larkAppSecret: 'test-secret', cliId, replyCardMode: 'unified',
     brandLabel: 'Example assistant', feedback: { enabled: feedback, audience: 'requester' },
-    ...(ownerOnlyProgress ? { ownerOnlyProgress: true, allowedUsers: ['ou_owner'] } : {}),
+    ...(ownerOnlyProgress ? { ownerOnlyProgress: true, allowedUsers: [ownerProgressToDm ? 'ou_requester' : 'ou_owner'] } : {}),
+    ...(ownerProgressToDm ? { ownerProgressToDm: true } : {}),
   }]));
   if (isolatedConfig) {
     const path = sendCredFilePath(dataDir, key.larkAppId);
     mkdirSync(join(root, 'bots', key.larkAppId), { recursive: true });
-    writeFileSync(path, JSON.stringify({ larkAppSecret: 'test-secret', ownerOnlyProgress: true, primaryOwnerOpenId: 'ou_owner' }));
+    writeFileSync(path, JSON.stringify({ larkAppSecret: 'test-secret', ownerOnlyProgress: true, ownerProgressToDm, primaryOwnerOpenId: ownerProgressToDm ? 'ou_requester' : 'ou_owner' }));
   }
   seedPersistedSessionRows(dataDir, key.larkAppId, { [key.sessionId]: {
     sessionId: key.sessionId, status: 'active', cliId, cliSessionId: 'native_custom',
@@ -74,6 +75,46 @@ function setup(cliId = 'codex', feedback = true, scope = 'thread', chatType = 'g
 }
 
 describe('custom schema-2 final uses the canonical reply lifecycle', () => {
+  it.each([false, true])('owner text progress reaches its daemon card while a later final stays in the thread (isolated=%s)', isolated => {
+    const { root, dataDir, run } = setup('traex', false, 'thread', 'group', true, isolated, true);
+    try {
+      const progress = spawnSyncTsScript(fixture, ['send', '--text', 'checking the owner request', '--response-kind', 'progress', '--no-mention'], {
+        cwd: fileURLToPath(new URL('..', import.meta.url)), encoding: 'utf8', timeout: 30000,
+        env: { PATH: process.env.PATH, HOME: root, SESSION_DATA_DIR: dataDir, BOTS_CONFIG: join(root, 'bots.json'),
+          BOTMUX_SESSION_ID: key.sessionId, BOTMUX_TURN_ID: key.turnId, BOTMUX_LARK_APP_ID: key.larkAppId,
+          BOTMUX_DAEMON_IPC_PORT: '19781', ...(isolated ? { BOTMUX_TEST_DENY_BOTS_CONFIG: '1' } : {}),
+          BOTMUX_TEST_PRIVATE_PROGRESS_RESPONSE: JSON.stringify({ ok: true, delivered: true, messageId: 'om_owner_private' }) },
+      });
+      expect(progress.status, String(progress.stderr)).toBe(0);
+      expect(captured(progress.stdout)).toEqual([]);
+      const privateCalls = String(progress.stdout).split('\n').filter(line => line.startsWith('CAPTURE_PRIVATE=')).map(line => JSON.parse(line.slice(16)));
+      expect(privateCalls).toHaveLength(1);
+      expect(privateCalls[0].body).toMatchObject({ turnId: key.turnId, text: 'checking the owner request' });
+      expect(String(progress.stdout)).toContain('"messageId":"om_owner_private"');
+      const final = run(customCard, 'final');
+      expect(final.status, String(final.stderr)).toBe(0);
+      expect(captured(final.stdout)).toHaveLength(1);
+      expect(captured(final.stdout)[0].path).toBe('/open-apis/im/v1/messages/om_root/reply');
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+  it('private daemon rejection does not send public progress or occupy the final answer', () => {
+    const { root, dataDir, run } = setup('traex', false, 'thread', 'group', true, false, true);
+    try {
+      const progress = spawnSyncTsScript(fixture, ['send', '--text', 'private progress', '--response-kind', 'progress', '--no-mention'], {
+        cwd: fileURLToPath(new URL('..', import.meta.url)), encoding: 'utf8', timeout: 30000,
+        env: { PATH: process.env.PATH, HOME: root, SESSION_DATA_DIR: dataDir, BOTS_CONFIG: join(root, 'bots.json'),
+          BOTMUX_SESSION_ID: key.sessionId, BOTMUX_TURN_ID: key.turnId, BOTMUX_LARK_APP_ID: key.larkAppId,
+          BOTMUX_DAEMON_IPC_PORT: '19781', BOTMUX_TEST_PRIVATE_PROGRESS_RESPONSE: JSON.stringify({ ok: false }) },
+      });
+      expect(progress.status, String(progress.stderr)).toBe(0);
+      expect(captured(progress.stdout)).toEqual([]);
+      expect(String(progress.stdout)).toContain('"delivered":false');
+      const final = run(customCard, 'final');
+      expect(final.status, String(final.stderr)).toBe(0);
+      expect(captured(final.stdout)).toHaveLength(1);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
   it.each(['progress', 'auxiliary'])('a guest %s send has no provider effect and does not consume the final answer', kind => {
     const { root, run } = setup('traex', false, 'thread', 'group', true);
     try {

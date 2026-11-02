@@ -2466,6 +2466,9 @@ export interface BotConfig {
   /** Human turns from other people publish only their final answer; primary
    * owner turns retain reactions and progress/thinking presentation. */
   ownerOnlyProgress?: boolean;
+  /** Send the primary owner's group-turn process to one updating DM card.
+   * Final answers and owner reactions retain their original group target. */
+  ownerProgressToDm?: boolean;
   /** Exact group IDs where existing native threads may continue without @.
    * This is not a grant; permissions and exclusive topic ownership still apply. */
   mentionlessThreadChats?: string[];
@@ -2541,6 +2544,9 @@ export interface BotConfig {
 }
 
 export interface BotState {
+  /** Host-attested primary owner in a send child, for presentation only.
+   * Never used by permission checks or added to resolvedAllowedUsers. */
+  progressOwnerOpenId?: string;
   config: BotConfig;
   /** In-memory parser outcome for nativeSubagentRuntime. Invalid persisted input
    * is intentionally omitted from `config`, so this bounded marker is the only
@@ -4487,6 +4493,7 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
       groupAccessConfirmation: entry.groupAccessConfirmation === true || undefined,
       ownerMentionFollowup: entry.ownerMentionFollowup === true || undefined,
       ownerOnlyProgress: entry.ownerOnlyProgress === true || undefined,
+      ownerProgressToDm: entry.ownerProgressToDm === true || undefined,
       mentionlessThreadChats: entry.mentionlessThreadChats === undefined
         ? undefined : [...new Set(normalizeStringList(entry.mentionlessThreadChats))],
       soloGroupMentionBypass: entry.soloGroupMentionBypass === false ? false : undefined,

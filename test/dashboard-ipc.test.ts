@@ -49,6 +49,7 @@ import { clearMessageListenerRunPreviewStore, markMessageListenerRunPreviewRepli
 import * as persistentBackend from '../src/core/persistent-backend.js';
 import { __testOnly_resetBotRegistry, getBot, loadBotConfigs, registerBot } from '../src/bot-registry.js';
 import { config } from '../src/config.js';
+import { ownerPrivateProgressManager } from '../src/core/owner-private-progress.js';
 import { botDefaultsPayload } from '../src/dashboard/bot-payload.js';
 import { createTurnResultRuntime, setTurnResultRuntime } from '../src/core/turn-result-runtime.js';
 import { TurnResultStore } from '../src/services/turn-result-store.js';
@@ -225,7 +226,36 @@ afterEach(async () => {
 });
 
 describe('dashboard IPC server', () => {
-  it.each(['groupAccessConfirmation', 'ownerMentionFollowup', 'ownerOnlyProgress'] as const)('updates %s on an Auto MAX pool without rewriting models or permissions', async key => {
+  it('private progress binds a valid session capability and refuses forged turns or recipients', async () => {
+    const appId = 'cli_private_ipc', sid = 'sid_private_ipc', turnId = 'om_owner_ipc';
+    registerBot({ larkAppId: appId, larkAppSecret: 'test', cliId: 'traex', allowedUsers: ['ou_owner'],
+      ownerProgressToDm: true, ownerOnlyProgress: true });
+    const ds: any = { larkAppId: appId, chatType: 'group', chatId: 'oc_group', currentTurnId: turnId,
+      session: { sessionId: sid, larkAppId: appId, rootMessageId: 'om_root', status: 'active',
+        chatId: 'oc_group', chatType: 'group', scope: 'thread' },
+      managedTurnOrigin: { capability: 'private-test-capability', turnId, identityTurnId: turnId,
+        dispatchAttempt: 1, callerOpenId: 'ou_owner' } };
+    const previousRegistry = workerPool.getActiveSessionsRegistry();
+    workerPool.setActiveSessionsRegistry(new Map([[sessionKey('om_root', appId), ds]]));
+    setLarkAppId(appId); setIpcAuthSecret(TEST_IPC_SECRET);
+    const publish = vi.spyOn(ownerPrivateProgressManager(), 'update').mockResolvedValue({ delivered: true, messageId: 'om_private_ipc' });
+    try {
+      handle = await startIpcServer({ port: 0, host: '127.0.0.1', authRequired: true });
+      const path = `/api/sessions/${sid}/private-progress`;
+      const post = (body: unknown) => fetch(`http://127.0.0.1:${handle!.port}${path}`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+      const origin = { originCapability: 'private-test-capability', originTurnId: turnId, originDispatchAttempt: 1 };
+      expect((await post({ ...origin, originCapability: 'forged', turnId, text: 'private' })).status).toBe(403);
+      expect((await post({ ...origin, turnId: 'om_another_turn', text: 'private' })).status).toBe(403);
+      expect(publish).not.toHaveBeenCalled();
+      const good = await post({ ...origin, turnId, text: 'progress', sessionId: 'other', owner: 'ou_other', chatId: 'oc_other' });
+      expect(good.status).toBe(200);
+      expect(await good.json()).toMatchObject({ ok: true, delivered: true, messageId: 'om_private_ipc' });
+      expect(publish).toHaveBeenCalledExactlyOnceWith(ds, turnId, { text: 'progress' });
+    } finally { publish.mockRestore(); workerPool.setActiveSessionsRegistry(previousRegistry ?? new Map()); }
+  });
+
+  it.each(['groupAccessConfirmation', 'ownerMentionFollowup', 'ownerOnlyProgress', 'ownerProgressToDm'] as const)('updates %s on an Auto MAX pool without rewriting models or permissions', async key => {
     const dir = mkdtempSync(join(tmpdir(), 'group-access-ipc-'));
     const path = join(dir, 'bots.json'), previous = process.env.BOTS_CONFIG;
     const fixture = { larkAppId: 'cli_group_access_ipc', larkAppSecret: 'fixture', cliId: 'traex',
@@ -238,7 +268,7 @@ describe('dashboard IPC server', () => {
       process.env.BOTS_CONFIG = path; writeFileSync(path, JSON.stringify([fixture]));
       loadBotConfigs().forEach(registerBot); setLarkAppId(fixture.larkAppId); setIpcAuthSecret(TEST_IPC_SECRET);
       handle = await startIpcServer({ port: 0, host: '127.0.0.1', authRequired: true });
-      const route = key === 'ownerOnlyProgress' ? '/api/bot-owner-only-progress' : key === 'ownerMentionFollowup' ? '/api/bot-owner-mention-followup' : '/api/bot-group-access-confirmation', base = `http://127.0.0.1:${handle.port}`;
+      const route = key === 'ownerProgressToDm' ? '/api/bot-owner-progress-to-dm' : key === 'ownerOnlyProgress' ? '/api/bot-owner-only-progress' : key === 'ownerMentionFollowup' ? '/api/bot-owner-mention-followup' : '/api/bot-group-access-confirmation', base = `http://127.0.0.1:${handle.port}`;
       const put = (body: unknown, auth = true) => fetch(base + route, { method: 'PUT',
         headers: { ...(auth ? trustedHostHeaders('PUT', route, handle!.port) : {}), 'content-type': 'application/json' }, body: JSON.stringify(body) });
       expect((await put({ [key]: true }, false)).status).toBe(401);

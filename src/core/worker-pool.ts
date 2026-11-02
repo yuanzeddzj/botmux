@@ -141,7 +141,7 @@ import { resolveReplyImages, type ReplyImageState } from '../im/lark/reply-image
 import { getSessionUsageSnapshot } from './cost-calculator.js';
 import { repairReplyMarkdown } from '../services/reply-markdown.js';
 import { renderBrandTemplate } from '../im/lark/brand-template.js';
-import { handleCotThinkingUpdate, handleCotThinkingSuperseded, finalizeCotMessage, abortCotMessage } from '../im/lark/cot-message.js';
+import { cotEnabled, cotToolResultEnabled, handleCotThinkingUpdate, handleCotThinkingSuperseded, finalizeCotMessage, abortCotMessage } from '../im/lark/cot-message.js';
 import { replyCardModeFor, replyCardSandboxBlocked, updateTurnReplyCard, queueTurnReplyTools, flushTurnReplyTools, settleTurnReplyCards, supersedeTurnReplyCard } from './turn-reply-card.js';
 import { captureTerminalReplyContext } from './terminal-reply-context.js';
 import { ReplyCardWithdrawnError } from '../services/turn-reply-card.js';
@@ -820,7 +820,8 @@ import { parseVcMeetingListenerOutput } from '../services/vc-meeting-listener-ou
 import { isLocalCliOpenEnabled, isLocalCliOpenReady } from '../services/local-cli-opener.js';
 import { sessionConfiguredRuntimeDisplayName } from './cli-runtime-display.js';
 import { armSilentScheduledTurn, disarmSilentScheduledTurn, isSilentScheduledTurn } from './silent-schedule-turns.js';
-import { ownerOnlyProgressSuppressed } from './owner-only-progress.js';
+import { ownerOnlyProgressSuppressed, publicProgressSuppressed } from './owner-only-progress.js';
+import { ownerPrivateProgressManager } from './owner-private-progress.js';
 import {
   mintScheduledContinuationTurnId,
   parseScheduledTurnId,
@@ -1548,7 +1549,7 @@ export function isResumeRecoveryPlaceholder(ds: DaemonSession): boolean {
 // per-session via `ds.streamingCardForced` (manually summon a live card).
 function streamingCardDisabled(ds: DaemonSession, turnId?: string): boolean {
   if (privateReplyEnabled(ds.session)) return true;
-  if (ownerOnlyProgressSuppressed(ds, turnId)) return true;
+  if (publicProgressSuppressed(ds, turnId)) return true;
   if (isDocNativeSession(ds) || handoffCardBlocksStreaming(ds, turnId)) return true;
   if (ds.streamingCardForced) return false;
   try {
@@ -4090,7 +4091,7 @@ export function managedAuxUiSuppressedFor(
   } catch {
     return true;
   }
-  if (ownerOnlyProgressSuppressed(ds, turnId)) return true;
+  if (publicProgressSuppressed(ds, turnId)) return true;
   if (isSilentScheduledTurn(ds, turnId)) return true;
   if (isMeetingDrivenTurn(ds, turnId, dispatchAttempt)) return true;
   const armedThrough = turnId ? ds.suppressedFinalOutputTurns?.get(turnId) : undefined;
@@ -15388,6 +15389,7 @@ export function forkWorker(
     solo: ds.soloSession === true,
     feedback: feedbackPolicy,
     ownerOnlyProgress: botCfg.ownerOnlyProgress,
+    ownerProgressToDm: botCfg.ownerProgressToDm,
     primaryOwnerOpenId: getOwnerOpenId(ds.larkAppId),
     terminalCardEpoch: ds.session.terminalCardEpoch,
     // Freeze the ACTUAL loaded bots-config path (getLoadedConfigPath) so a
@@ -15883,7 +15885,7 @@ function setupWorkerHandlers(
     // → updateMessage would still dial Feishu). Dashboard/web-terminal state is
     // still updated before these guards, so the terminal view is unaffected.
     if (!larkTransportEnabled({ chatId: ds.chatId, apiOnly: getBot(ds.larkAppId).config.apiOnly })) return true;
-    if (ownerOnlyProgressSuppressed(ds, turnId)) return true;
+    if (publicProgressSuppressed(ds, turnId)) return true;
     if (isSilentScheduledTurn(ds, turnId)) return true;
     // Plan B: a VC meeting agent is an ordinary chat-scope session, so the live
     // STREAMING CARD is no longer gated here at all — it surfaces through the
@@ -17310,6 +17312,7 @@ function setupWorkerHandlers(
         cliNotices.finish(msg.turnId, msg.dispatchAttempt);
         if (msg.sessionId !== ds.session.sessionId) break;
         handleCotThinkingSuperseded(ds, msg);
+        void ownerPrivateProgressManager().finish(ds, msg.turnId, 'superseded');
         if (!managedAuxUiSuppressed(msg.turnId, msg.dispatchAttempt)) {
           void supersedeTurnReplyCard(ds, msg,
             (body, type, uuid, beforeWrite) => scopedReply(body, type, msg.turnId, { uuid, beforeWrite }),
@@ -17328,6 +17331,13 @@ function setupWorkerHandlers(
         // Cache even when the CoT switches are off — `/cot show` uses this to
         // summon the bubble mid-turn with everything accumulated so far.
         ds.lastThinkingUpdate = { entries: msg.entries, turnId: msg.turnId, dispatchAttempt: msg.dispatchAttempt };
+        if (ownerPrivateProgressManager().eligible(ds, msg.turnId)) {
+          if (cotEnabled(ds)) {
+            const entries = cotToolResultEnabled(ds) ? msg.entries : msg.entries.filter(entry => entry.kind !== 'tool_result');
+            void ownerPrivateProgressManager().update(ds, msg.turnId, { entries });
+          }
+          break;
+        }
         if (replyCardModeFor(ds, msg.turnId) !== 'legacy') {
           if (!managedAuxUiSuppressed(msg.turnId, msg.dispatchAttempt)) {
             queueTurnReplyTools(ds, msg,
@@ -22428,6 +22438,8 @@ export function forkAdoptWorker(
     // the sandboxed agent could flip. The worker then physically cannot dial
     // Feishu (uploader/cred-write are also skipped downstream on the same test).
     larkAppSecret: larkTransportEnabled({ chatId: ds.chatId, apiOnly: botCfg.apiOnly }) ? botCfg.larkAppSecret : '',
+    ownerOnlyProgress: botCfg.ownerOnlyProgress, ownerProgressToDm: botCfg.ownerProgressToDm,
+    primaryOwnerOpenId: getOwnerOpenId(ds.larkAppId),
     apiOnly: botCfg.apiOnly,
     brand: normalizeBrand(botCfg.brand),
     botName: bot.botName,

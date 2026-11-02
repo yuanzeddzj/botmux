@@ -178,7 +178,8 @@ import {
 } from './services/durable-lark-session-control.js';
 import { failedTurnCaller, recordLimitedFailedTurn, clearLimitedFailedTurn, recordFailedTurnTerminal, noteFailedTurnRecoveryInput } from './core/failed-turn-recovery.js';
 import { isSilentScheduledTurn } from './core/silent-schedule-turns.js';
-import { ownerOnlyProgressSuppressed } from './core/owner-only-progress.js';
+import { ownerOnlyProgressSuppressed, publicProgressSuppressed, ownerPrivateProgressTurn } from './core/owner-only-progress.js';
+import { ownerPrivateProgressManager } from './core/owner-private-progress.js';
 import * as chatFirstSeenStore from './services/chat-first-seen-store.js';
 import { ensureDefaultOncallBound } from './services/oncall-store.js';
 import * as scheduleStore from './services/schedule-store.js';
@@ -4096,7 +4097,7 @@ function startMemoryDiagnostics(): ReturnType<typeof setInterval> | undefined {
  * address spaces never collide; the lookup just tries both.
  */
 function streamingCardDisabledFor(ds: DaemonSession, turnId?: string): boolean {
-  if (ownerOnlyProgressSuppressed(ds, turnId)) return true;
+  if (publicProgressSuppressed(ds, turnId)) return true;
   if (privateReplyEnabled(ds.session)) return true;
   if (ds.streamingCardForced) return false;
   try {
@@ -31413,7 +31414,12 @@ export async function startDaemon(botIndex?: number): Promise<void> {
         if (context.status === 'limited') recordLimitedFailedTurn(ds, context.turnId);
         else if (context.prevStatus === 'limited') clearLimitedFailedTurn(ds);
       } catch (error) { logger.error(`[recovery] quota snapshot failed: ${String(error)}`); }
-      if (ownerOnlyProgressSuppressed(ds, context.turnId)) return;
+      const privateTurn = ownerPrivateProgressTurn(ds, context.turnId);
+      if (privateTurn && ownerPrivateProgressManager().eligible(ds, privateTurn)) {
+        void ownerPrivateProgressManager().update(ds, privateTurn, { status: context.status === 'limited' ? 'limited'
+          : context.status === 'stalled' ? 'waiting' : 'working' });
+      }
+      if (publicProgressSuppressed(ds, context.turnId)) return;
       return cardRuntimeStatusBridge.publish({
         sessionId: ds.session.sessionId,
         larkAppId: ds.larkAppId,
@@ -31529,6 +31535,7 @@ export async function startDaemon(botIndex?: number): Promise<void> {
       } catch { logger.warn('[group-context] native input receipt unavailable; background may repeat'); }
     },
     async onTurnTerminal(ds, terminal, context) {
+      void ownerPrivateProgressManager().finish(ds, terminal.turnId, terminal.status);
       if (ds.session.deploymentContinuation?.state !== 'cancelled'
         && ds.session.deploymentContinuation?.workerGeneration === context.workerGeneration) {
         try { cancelDeploymentContinuation(ds.session, previous => sessionStore.updateDeploymentContinuation(ds.session, previous), terminal.turnId); }
@@ -32887,6 +32894,7 @@ export async function startDaemon(botIndex?: number): Promise<void> {
   // old process, so without this they spin on「执行中」forever). Scoped to
   // THIS bot's markers: the orphan dir is shared across per-bot PM2 daemons.
   if (selfDaemonLarkAppId) {
+    void ownerPrivateProgressManager().recover(selfDaemonLarkAppId).catch(() => { /* cosmetic */ });
     void sweepOrphanCotMessages(selfDaemonLarkAppId).catch(() => { /* cosmetic */ });
     void sweepInterruptedReplyCards(selfDaemonLarkAppId).catch(() => { /* cosmetic */ });
   }

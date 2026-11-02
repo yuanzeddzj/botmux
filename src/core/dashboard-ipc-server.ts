@@ -523,6 +523,8 @@ import { validateRoleLibraryPath } from './role-library.js';
 import { repinSessionWorkingDir } from './session-cwd.js';
 import { isolatedDispatchOutputSinkAllowed } from './dispatch-output-sink.js';
 import { authorizeSessionScopedIpc } from './daemon-ipc-session-auth.js';
+import { ownerPrivateProgressManager } from './owner-private-progress.js';
+import { ownerGroupProgressRecipient } from './owner-only-progress.js';
 import {
   NATIVE_SUBAGENT_RUNTIME_IPC_HEADERS,
   NATIVE_SUBAGENT_RUNTIME_RESPONSE_PROOF_TTL_MS,
@@ -1156,7 +1158,7 @@ export function routeHasNarrowUntrustedAuth(method: string, pathname: string): b
   // 该会话的 rotating per-turn
   // capability 并绑定到 URL 里的 sessionId（同 /api/asks 姿势）——capability 只
   // 证明「我是这个会话当前这一轮的 CLI」，选不了别的会话。
-  if (method === 'POST' && /^\/api\/sessions\/[^/]+\/(?:slash|cd|close|preview|chat-rename|chat-manager|rename|project|decision-board|project-dispatch-policy|continuation|durable-send|turn-delivery|deferred-topic|link-refs\/register|link-refs\/resolve|auth-request|auth-status)$/.test(pathname)) return true;
+  if (method === 'POST' && /^\/api\/sessions\/[^/]+\/(?:slash|cd|close|preview|chat-rename|chat-manager|rename|project|decision-board|project-dispatch-policy|continuation|durable-send|turn-delivery|deferred-topic|link-refs\/register|link-refs\/resolve|auth-request|auth-status|private-progress)$/.test(pathname)) return true;
   // UserPromptSubmit hook 的 envelope claim：沙箱内 hook 读不到 host secret，
   // 走 body 里的 per-turn capability；handler 内 sessionCliIpcAuth 绑定到 URL 的
   // sessionId + 按 managedTurnOrigin.turnId 权威取（同 /close 姿势）。
@@ -8342,6 +8344,7 @@ ipcRoute('GET', '/api/bot-default-oncall', requireBoundBot(async (_req, res) => 
     groupAccessConfirmation: getBot(cachedLarkAppId).config.groupAccessConfirmation === true,
     ownerMentionFollowup: getBot(cachedLarkAppId).config.ownerMentionFollowup === true,
     ownerOnlyProgress: getBot(cachedLarkAppId).config.ownerOnlyProgress === true,
+    ownerProgressToDm: getBot(cachedLarkAppId).config.ownerProgressToDm === true,
     mentionlessThreadChats: getBot(cachedLarkAppId).config.mentionlessThreadChats ?? [],
     quotaFallbackBot: (() => {
       try { return getBot(cachedLarkAppId).config.quotaFallbackBot ?? null; }
@@ -10668,6 +10671,50 @@ ipcRoute('GET', '/api/bot-group-mention-policy', requireBoundBot((_req, res) => 
   jsonRes(res, 200, { ok: true, groupMentionRequired: cfg.groupMentionRequired === true,
     mentionlessThreadChats: cfg.mentionlessThreadChats ?? [] });
 }));
+ipcRoute('POST', '/api/sessions/:sessionId/private-progress', async (req, res, params) => {
+  let body: unknown;
+  try { body = await readJsonBody(req, 20000); } catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
+  const record = body && typeof body === 'object' && !Array.isArray(body) ? body as Record<string, unknown> : undefined;
+  const ds = findActiveBySessionId(params.sessionId);
+  const auth = sessionCliIpcAuth(req, ds, params.sessionId, record);
+  if (!auth.ok) return jsonRes(res, 403, { ok: false, error: auth.error });
+  if (!ds || ds.larkAppId !== cachedLarkAppId || ds.session.status !== 'active') {
+    return jsonRes(res, 404, { ok: false, error: 'session_not_active' });
+  }
+  const turnId = record?.turnId, text = record?.text;
+  if (typeof turnId !== 'string' || !turnId || turnId.length > 256
+    || typeof text !== 'string' || !text.trim() || Buffer.byteLength(text) > 16000) {
+    return jsonRes(res, 400, { ok: false, error: 'invalid_private_progress' });
+  }
+  if (!isTrustedHostIpcRequest(req) && turnId !== ds.managedTurnOrigin?.turnId
+    && turnId !== ds.managedTurnOrigin?.identityTurnId) {
+    return jsonRes(res, 403, { ok: false, error: 'origin_unproven' });
+  }
+  if (getBot(ds.larkAppId).config.ownerProgressToDm !== true
+    && ownerGroupProgressRecipient(ds.larkAppId, { ...ds.session, chatType: ds.chatType }, turnId)) {
+    return jsonRes(res, 200, { ok: true, route: 'original' });
+  }
+  const receipt = await ownerPrivateProgressManager().update(ds, turnId, { text });
+  return jsonRes(res, 200, { ok: true, ...receipt });
+});
+
+ipcRoute('PUT', '/api/bot-owner-progress-to-dm', requireBoundBot(async (req, res) => {
+  let body: unknown;
+  try { body = await readJsonBody(req); } catch { return jsonRes(res, 400, { error: 'bad_json' }); }
+  if (!body || typeof body !== 'object' || Array.isArray(body)
+    || typeof (body as { ownerProgressToDm?: unknown }).ownerProgressToDm !== 'boolean') {
+    return jsonRes(res, 400, { error: 'ownerProgressToDm_requires_boolean' });
+  }
+  const value = (body as { ownerProgressToDm: boolean }).ownerProgressToDm;
+  const saved = await rmwBotEntry(cachedLarkAppId, entry => {
+    entry.ownerProgressToDm = value; return { write: true, result: null };
+  });
+  if (!saved.ok) return jsonRes(res, 500, { error: 'save_failed' });
+  getBot(cachedLarkAppId).config.ownerProgressToDm = value || undefined;
+  if (value) void ownerPrivateProgressManager().recover(cachedLarkAppId, true);
+  return jsonRes(res, 200, { ok: true, ownerProgressToDm: value });
+}));
+
 ipcRoute('PUT', '/api/bot-owner-only-progress', requireBoundBot(async (req, res) => {
   const body = await readJsonBodyOrBadJson<unknown>(req, res);
   if (body === BAD_JSON) return;

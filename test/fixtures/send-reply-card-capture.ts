@@ -215,6 +215,16 @@ if (process.env.BOTMUX_TEST_DEFERRED_TOPIC_DAEMON === '1') {
     });
   });
 }
+if (process.env.BOTMUX_TEST_PRIVATE_PROGRESS_RESPONSE) {
+  __setLoopbackTransportForTests(async (url, init) => {
+    const path = new URL(url).pathname;
+    if (!path.endsWith('/private-progress')) throw new Error('Unexpected private progress fixture route');
+    const body = typeof init.body === 'string' ? JSON.parse(init.body) : undefined;
+    console.log('CAPTURE_PRIVATE=' + JSON.stringify({ path, body }));
+    const response = JSON.parse(process.env.BOTMUX_TEST_PRIVATE_PROGRESS_RESPONSE!);
+    return new Response(JSON.stringify(response), { status: response.ok ? 200 : 403 });
+  });
+}
 // Any non-SDK network request also fails closed; this fixture never contacts Feishu.
 globalThis.fetch = async () => { throw new Error('Unexpected test fetch'); };
 process.argv = [process.execPath, './src/cli.ts', ...process.argv.slice(2)];

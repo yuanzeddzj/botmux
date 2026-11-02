@@ -22894,7 +22894,7 @@ async function spawnCli(
       writeFileSync(
         credPath,
         JSON.stringify({ larkAppId: cfg.larkAppId, larkAppSecret: cfg.larkAppSecret, brand: cfg.brand, apiOnly: cfg.apiOnly,
-          feedback: cfg.feedback, ownerOnlyProgress: cfg.ownerOnlyProgress, primaryOwnerOpenId: cfg.primaryOwnerOpenId }),
+          feedback: cfg.feedback, ownerOnlyProgress: cfg.ownerOnlyProgress, ownerProgressToDm: cfg.ownerProgressToDm, primaryOwnerOpenId: cfg.primaryOwnerOpenId }),
         { mode: 0o600 },
       );
     } catch (e) {

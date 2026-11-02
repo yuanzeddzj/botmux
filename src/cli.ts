@@ -5977,7 +5977,7 @@ async function cmdMaintenance(args: string[]): Promise<void> {
 async function postSessionCliIpc(
   ipcPort: number,
   sessionId: string,
-  route: 'slash' | 'cd' | 'close' | 'preview' | 'chat-rename' | 'chat-manager' | 'rename' | 'project' | 'decision-board' | 'continuation' | 'durable-send' | 'turn-delivery' | typeof DEFERRED_TOPIC_CLAIM_ROUTE | 'link-refs/register' | 'link-refs/resolve',
+  route: 'slash' | 'cd' | 'close' | 'preview' | 'chat-rename' | 'chat-manager' | 'rename' | 'project' | 'decision-board' | 'continuation' | 'durable-send' | 'turn-delivery' | typeof DEFERRED_TOPIC_CLAIM_ROUTE | 'link-refs/register' | 'link-refs/resolve' | 'private-progress',
   payload: Record<string, unknown>,
 ): Promise<Response> {
   const requestBody: Record<string, unknown> = { ...payload };
@@ -6011,6 +6011,7 @@ async function postSessionCliIpc(
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(requestBody),
+    ...(route === 'private-progress' ? { signal: AbortSignal.timeout(20000) } : {}),
   } satisfies RequestInit;
   return hostSecret
     ? fetchDaemonIpc(ipcPort, path, init, hostSecret)
@@ -10039,7 +10040,7 @@ async function registerSelfFromCredFile(): Promise<void> {
   if (!appId || !sd) return;
   const { sendCredFilePath } = await import('./adapters/cli/read-isolation.js');
   let cred: { larkAppSecret?: string; brand?: string; apiOnly?: boolean; feedback?: import('./services/feedback-policy.js').FeedbackPolicyInput;
-    ownerOnlyProgress?: boolean; primaryOwnerOpenId?: string };
+    ownerOnlyProgress?: boolean; ownerProgressToDm?: boolean; primaryOwnerOpenId?: string };
   try {
     // send-cred lives in the bot's BOT_HOME (<BOTMUX_HOME>/bots/<appId>/send-cred.json);
     // sendCredFilePath takes SESSION_DATA_DIR and derives BOTMUX_HOME (its parent).
@@ -10053,7 +10054,7 @@ async function registerSelfFromCredFile(): Promise<void> {
   // no secret is still a no-op (nothing to register).
   if (!cred.larkAppSecret && cred.apiOnly !== true) return;
   const { registerBot } = await import('./bot-registry.js');
-  registerBot({
+  const registered = registerBot({
     larkAppId: appId,
     larkAppSecret: cred.larkAppSecret ?? '',
     apiOnly: cred.apiOnly === true || undefined,
@@ -10061,6 +10062,7 @@ async function registerSelfFromCredFile(): Promise<void> {
     brand: cred.brand as 'feishu' | 'lark' | undefined,
     feedback: cred.feedback,
     ownerOnlyProgress: cred.ownerOnlyProgress,
+    ownerProgressToDm: cred.ownerProgressToDm,
     ...(cred.primaryOwnerOpenId ? { allowedUsers: [cred.primaryOwnerOpenId] } : {}),
     replyStyle: resolveReplyStyleConfig(appId),
     ...resolveReplyFooterPreferences(appId),
@@ -10071,6 +10073,7 @@ async function registerSelfFromCredFile(): Promise<void> {
         ? (process.env.BOTMUX_USAGE_DISPLAY as import('./bot-registry.js').UsageDisplayMode)
         : undefined,
   } as import('./bot-registry.js').BotConfig);
+  if (cred.primaryOwnerOpenId?.startsWith('ou_')) registered.progressOwnerOpenId = cred.primaryOwnerOpenId;
 }
 
 /**
@@ -11781,16 +11784,27 @@ async function cmdSend(rest: string[]): Promise<void> {
   // envPinnedRiffBot is re-registered LAST so a remote env credential is never
   // clobbered by a stale bots.json entry for the same app.
   const { registerBot, loadBotConfigs, findOncallChatForAnyBot, getBot } = await import('./bot-registry.js');
-  try { for (const cfg of loadBotConfigs()) registerBot(cfg); } catch { /* */ }
+  const presentationApp = (originSession ?? s).larkAppId ?? appId;
+  let attestedProgressOwner: string | undefined;
+  try { attestedProgressOwner = getBot(presentationApp).progressOwnerOpenId; } catch { /* no credential sidecar */ }
+  let presentationConfigLoaded = false;
+  try {
+    const configs = loadBotConfigs();
+    presentationConfigLoaded = configs.some(cfg => cfg.larkAppId === presentationApp);
+    for (const cfg of configs) registerBot(cfg);
+  } catch { /* isolated */ }
   if (envPinnedRiffBot) { try { registerBot(envPinnedRiffBot); } catch { /* */ } }
+  if (attestedProgressOwner) { try { getBot(presentationApp).progressOwnerOpenId = attestedProgressOwner; } catch { /* */ } }
 
-  const { nonOwnerHumanSendSuppressed } = await import('./core/owner-only-progress.js');
+  const { nonOwnerHumanSendSuppressed, privateProgressSenderUnproven } = await import('./core/owner-only-progress.js');
   const presentationSource = originSession ?? s;
-  if (nonOwnerHumanSendSuppressed(presentationSource.larkAppId ?? appId, presentationSource,
+  const progressUnproven = effectiveResponseKind !== 'final' && privateProgressSenderUnproven(
+    presentationSource.larkAppId ?? appId, presentationSource, originSession ? originTurnId : currentTurnId);
+  if (progressUnproven || nonOwnerHumanSendSuppressed(presentationSource.larkAppId ?? appId, presentationSource,
     originSession ? originTurnId : currentTurnId, effectiveResponseKind)) {
     console.error('本轮仅发送最终答复；过程消息已省略。请使用 botmux send --response-kind final 发送答复。');
     console.log(JSON.stringify({ success: true, delivered: false, suppressed: true,
-      reason: 'non_owner_progress', sessionId: sid, turnId: currentTurnId }));
+      reason: progressUnproven ? 'progress_sender_unproven' : 'non_owner_progress', sessionId: sid, turnId: currentTurnId }));
     return;
   }
 
@@ -11828,6 +11842,42 @@ async function cmdSend(rest: string[]): Promise<void> {
       getBot(appId).config.topicUnavailablePolicy);
   };
   await checkSendTopics();
+  const { ownerPrivateProgressRecipient, ownerGroupProgressRecipient } = await import('./core/owner-only-progress.js');
+  const privateAppId = presentationSource.larkAppId ?? appId;
+  const privateTurnId = originSession ? originTurnId : currentTurnId;
+  const isolatedOwnerNeedsPolicy = !presentationConfigLoaded && getBot(privateAppId).config.ownerOnlyProgress === true
+    && ownerGroupProgressRecipient(privateAppId, presentationSource, privateTurnId);
+  if (effectiveResponseKind !== 'final' && !asChoice && !rest.includes('--slash')
+    && (ownerPrivateProgressRecipient(privateAppId, presentationSource, privateTurnId) || isolatedOwnerNeedsPolicy)) {
+    if (customCardRequested || rest.some(token => /^(--images?|--files?|--videos?|--voice|--audio)(=|$)/.test(token))) {
+      console.error('过程私聊卡接收文本进度；附件或交互卡片请使用 --response-kind final 发送答复。');
+      process.exitCode = 2;
+      return;
+    }
+    let receipt: { delivered: boolean; messageId?: string } = { delivered: false };
+    let originalRouteAuthorized = false;
+    try {
+      const claim = readManagedOriginCapability(resolveDataDir(), presentationSource.sessionId,
+        process.env.BOTMUX_SEND_RELAY, process.env.BOTMUX_ORIGIN_CHANNEL_ID);
+      let port = resolveDaemonIpcPort(claim?.ipcPort, process.env.BOTMUX_DAEMON_IPC_PORT);
+      if (!port) { try { port = findDaemon(privateAppId)?.ipcPort; } catch { /* isolated */ } }
+      if (!port) throw new Error('private_progress_daemon_unavailable');
+      const response = await postSessionCliIpc(port, presentationSource.sessionId, 'private-progress',
+        { turnId: privateTurnId, text: content });
+      const result = await response.json() as { ok?: boolean; delivered?: boolean; messageId?: string; route?: string };
+      originalRouteAuthorized = response.ok && result.ok === true && result.route === 'original';
+      if (response.ok && result.ok && result.delivered && result.messageId) {
+        receipt = { delivered: true, messageId: result.messageId };
+      }
+    } catch { /* process display is cosmetic; never fall back into the group */ }
+    if (!originalRouteAuthorized) {
+      console.error(receipt.delivered ? '✓ 已更新私聊中的任务进展' : '私聊过程展示暂不可用；最终答复仍使用 --response-kind final。');
+      console.log(JSON.stringify({ success: true, ...receipt, private: true, responseKind: effectiveResponseKind,
+        ...(receipt.delivered ? {} : { suppressed: true, reason: 'private_progress_unavailable' }),
+        sessionId: presentationSource.sessionId, turnId: privateTurnId }));
+      return;
+    }
+  }
   // Resolve sender-scoped bot identities before the early voice return. Voice
   // used to skip the text path's XPI gate entirely, so an explicitly addressed
   // bot received an unclassified bot message that the receiver then dropped.
