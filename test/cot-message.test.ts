@@ -20,9 +20,8 @@ vi.mock('../src/bot-registry.js', () => ({
 import { mkdtempSync, existsSync, readdirSync, rmSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { handleCotThinkingUpdate, finalizeCotMessage, abortCotMessage, sweepOrphanCotMessages, settleCotMessageForShutdown } from '../src/im/lark/cot-message.js';
+import { handleCotThinkingUpdate, finalizeCotMessage, abortCotMessage, sweepOrphanCotMessages, settleCotMessageForShutdown, __testOnly_setOnlyOwnerGroup } from '../src/im/lark/cot-message.js';
 import { getBot } from '../src/bot-registry.js';
-import { __testOnly_resetOwnerGroupAudience, noteOwnerGroupAudience } from '../src/core/owner-only-progress.js';
 import { armSilentScheduledTurn } from '../src/core/silent-schedule-turns.js';
 import { t, localeForBot } from '../src/i18n/index.js';
 import { writeRoleReplyPrivately } from '../src/core/role-resolver.js';
@@ -60,7 +59,7 @@ function pushedEvents(): Array<{ type: string; content: any }> {
 }
 
 beforeEach(() => {
-  __testOnly_resetOwnerGroupAudience();
+  __testOnly_setOnlyOwnerGroup();
   request.mockReset().mockImplementation(async (req: any) => {
     if (req.method === 'POST' && req.url === '/open-apis/im/v1/message_cot') {
       return { code: 0, data: { cot_id: 'cot1', message_id: 'om_cot_msg1' } };
@@ -132,8 +131,8 @@ describe('handleCotThinkingUpdate', () => {
         },
       },
     });
-    expect(handleCotThinkingUpdate(ds, upd([think('step 1')]))).toBe(false);
-    expect(handleCotThinkingUpdate(ds, upd([think('step 1')]), { ownerOpenId: 'ou_owner' })).toBe(true);
+    __testOnly_setOnlyOwnerGroup(async () => false);
+    expect(handleCotThinkingUpdate(ds, upd([think('step 1')]))).toBe(true);
     await flush();
     const create = request.mock.calls.find(([req]) => req.method === 'POST')![0];
     expect(create.params).toEqual({ receive_id_type: 'open_id' });
@@ -143,7 +142,7 @@ describe('handleCotThinkingUpdate', () => {
 
   it('keeps the native bubble under the original message when the group has only the owner', async () => {
     vi.mocked(getBot).mockReturnValue({ config: { cotEnabled: true, ownerProgressToDm: true } } as any);
-    noteOwnerGroupAudience('app1', 'oc_chat1', 'owner-only', 60_000);
+    __testOnly_setOnlyOwnerGroup(async () => true);
     const ds = makeDs({
       chatType: 'group',
       session: {

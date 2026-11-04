@@ -45,7 +45,7 @@ import { getBot, getBotClient } from '../../bot-registry.js';
 import { boundSubjectForTitle, subjectFromArgsString, type ToolSubject } from '../../services/cot-subject.js';
 import { fallbackTurnId, frozenReplyContextForTurn } from '../../core/reply-target.js';
 import { isSilentScheduledTurn } from '../../core/silent-schedule-turns.js';
-import { ownerProgressShownInGroup, publicProgressSuppressed } from '../../core/owner-only-progress.js';
+import { ownerPrivateProgressRecipient, publicProgressSuppressed } from '../../core/owner-only-progress.js';
 import { pendingStartingCardPublication } from '../../core/starting-card-publication.js';
 import { TopicSendError } from '../../cli/topic-send-guard.js';
 import { privateReplyEnabled } from '../../core/private-reply.js';
@@ -88,9 +88,9 @@ interface CotState {
   finishStatus?: 'done' | 'interrupted';
   /** Worker loss is not evidence that an external adopted CLI stopped. */
   workerDisconnected?: boolean;
-  /** Set when this bubble is the owner's private-chat copy of a shared-group turn.
-   * Absent means the bubble belongs to the session chat, under the original message. */
-  privateOwnerOpenId?: string;
+  /** Owner open_id when this bubble is the private-chat copy. null means the
+   * existing group placement was chosen. undefined means not chosen yet. */
+  dmOwner?: string | null;
 }
 
 const states = new WeakMap<DaemonSession, CotState>();
@@ -384,16 +384,53 @@ function assertCotResponse(larkAppId: string, response: any, state?: CotState): 
   // Legacy keeps its existing response handling; strict business-code checks are opt-in.
 }
 
+const onlyOwnerCache = new Map<string, { onlyOwner: boolean; expiresAt: number }>();
+const defaultOnlyOwnerGroup = async (appId: string, chatId: string, owner: string): Promise<boolean> => {
+  const key = appId + '\0' + chatId;
+  const hit = onlyOwnerCache.get(key);
+  if (hit && hit.expiresAt > Date.now()) return hit.onlyOwner;
+  let onlyOwner = false;
+  let ttl = 30_000;
+  try {
+    const { getChatInfo, listChatUserMembers } = await import('./client.js');
+    const info = await getChatInfo(appId, chatId);
+    if (info.userCount === 1) {
+      const members = await listChatUserMembers(appId, chatId);
+      onlyOwner = members.length === 1 && members[0]?.openId === owner;
+    }
+    ttl = 5 * 60 * 1000;
+  } catch { onlyOwner = false; }
+  onlyOwnerCache.set(key, { onlyOwner, expiresAt: Date.now() + ttl });
+  return onlyOwner;
+};
+let onlyOwnerGroup = defaultOnlyOwnerGroup;
+
+/** Same native bubble. A shared group changes only the recipient to the owner. */
+async function dmOwnerForTurn(ds: DaemonSession, turnId: string): Promise<string | null> {
+  let owner: string | undefined;
+  try {
+    owner = ownerPrivateProgressRecipient(ds.larkAppId, { ...ds.session, chatType: ds.chatType }, turnId);
+  } catch { return null; }
+  if (!owner || !ds.chatId) return null;
+  if (await onlyOwnerGroup(ds.larkAppId, ds.chatId, owner)) return null;
+  return owner;
+}
+
+export function __testOnly_setOnlyOwnerGroup(fn?: typeof onlyOwnerGroup): void {
+  onlyOwnerGroup = fn ?? defaultOnlyOwnerGroup;
+  onlyOwnerCache.clear();
+}
+
 async function apiCreate(ds: DaemonSession, state: CotState): Promise<void> {
-  const placement = state.privateOwnerOpenId ? {} : cotPlacement(ds, state);
-  if (!state.privateOwnerOpenId && getBot(ds.larkAppId)?.config?.topicUnavailablePolicy === 'stop') {
+  const placement = state.dmOwner ? {} : cotPlacement(ds, state);
+  if (!state.dmOwner && getBot(ds.larkAppId)?.config?.topicUnavailablePolicy === 'stop') {
     const target = frozenReplyContextForTurn(ds, fallbackTurnId(ds, state.turnId)).target;
     if (placement.origin_message_id || target.mode === 'thread' || target.mode === 'quote') {
       await assertCotWriteAllowed(ds, state, placement.origin_message_id);
     }
   }
   const c = getBotClient(ds.larkAppId);
-  const privateOwner = state.privateOwnerOpenId;
+  const privateOwner = state.dmOwner || undefined;
   const res = await c.request({
     method: 'POST',
     url: '/open-apis/im/v1/message_cot',
@@ -418,7 +455,7 @@ async function apiAppend(ds: DaemonSession, state: CotState, events: CotEvent[])
   const c = getBotClient(ds.larkAppId);
   // PUT body caps events at 50 per call.
   for (let i = 0; i < events.length; i += 50) {
-    if (!state.privateOwnerOpenId && getBot(ds.larkAppId)?.config?.topicUnavailablePolicy === 'stop') {
+    if (!state.dmOwner && getBot(ds.larkAppId)?.config?.topicUnavailablePolicy === 'stop') {
       await assertCotWriteAllowed(ds, state, state.messageId);
     }
     const response = await c.request({
@@ -433,7 +470,7 @@ async function apiAppend(ds: DaemonSession, state: CotState, events: CotEvent[])
 
 /** Best-effort error-path completion (normal completion rides RUN_FINISHED). */
 async function apiComplete(ds: DaemonSession, state: CotState, reason: 'done' | 'error'): Promise<void> {
-  if (!state.privateOwnerOpenId && getBot(ds.larkAppId)?.config?.topicUnavailablePolicy === 'stop') {
+  if (!state.dmOwner && getBot(ds.larkAppId)?.config?.topicUnavailablePolicy === 'stop') {
     await assertCotWriteAllowed(ds, state, state.messageId);
   }
   const c = getBotClient(ds.larkAppId);
@@ -651,6 +688,7 @@ async function pump(ds: DaemonSession, state: CotState): Promise<void> {
             break;
           }
         }
+        if (state.dmOwner === undefined) state.dmOwner = await dmOwnerForTurn(ds, state.turnId);
         await apiCreate(ds, state);
         // Record the orphan marker the moment the bubble exists — before the
         // prologue append. If the prologue fails (or the daemon restarts
@@ -722,17 +760,17 @@ async function pump(ds: DaemonSession, state: CotState): Promise<void> {
 export function handleCotThinkingUpdate(
   ds: DaemonSession,
   msg: Extract<WorkerToDaemon, { type: 'thinking_update' }>,
-  delivery?: { ownerOpenId: string },
 ): boolean {
   // Thinking bubbles are outbound messages too. Keep silent fires quiet even
   // when /cot show is armed, without suppressing another turn in this session.
   if (isSilentScheduledTurn(ds, msg.turnId) || ds.session.hiddenThinkingTurns?.includes(msg.turnId)) return false;
-  // Shared-group owner turns stay out of the group. A known owner-only group
-  // puts the same native bubble under the original message. An explicit
-  // owner open_id sends that bubble to the private chat instead.
-  if (publicProgressSuppressed(ds, msg.turnId)
-    && !delivery?.ownerOpenId
-    && !ownerProgressShownInGroup(ds, msg.turnId)) return false;
+  // Other people's process stays hidden. An owner group turn still uses this
+  // same bubble; create-time only changes the recipient when the group is shared.
+  let ownerTurn: string | undefined;
+  try {
+    ownerTurn = ownerPrivateProgressRecipient(ds.larkAppId, { ...ds.session, chatType: ds.chatType }, msg.turnId);
+  } catch { ownerTurn = undefined; }
+  if (publicProgressSuppressed(ds, msg.turnId) && !ownerTurn) return false;
   if (!cotEnabled(ds)) return false;
   const key = turnKeyOf(msg);
   let state = states.get(ds);
@@ -751,7 +789,6 @@ export function handleCotThinkingUpdate(
       settled: false,
       sentCount: 0,
       pumping: false,
-      ...(delivery?.ownerOpenId ? { privateOwnerOpenId: delivery.ownerOpenId } : {}),
     };
     states.set(ds, state);
     rememberRecentState(ds, state);
