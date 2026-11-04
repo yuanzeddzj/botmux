@@ -10694,6 +10694,9 @@ ipcRoute('POST', '/api/sessions/:sessionId/private-progress', async (req, res, p
     && ownerGroupProgressRecipient(ds.larkAppId, { ...ds.session, chatType: ds.chatType }, turnId)) {
     return jsonRes(res, 200, { ok: true, route: 'original' });
   }
+  if (getBot(ds.larkAppId).config.ownerProgressToDm === true) {
+    return jsonRes(res, 200, { ok: true, route: 'cot', delivered: true });
+  }
   const receipt = await ownerPrivateProgressManager().update(ds, turnId, { text });
   return jsonRes(res, 200, { ok: true, ...receipt });
 });

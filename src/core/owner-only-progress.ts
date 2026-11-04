@@ -65,12 +65,47 @@ export function ownerPrivateProgressTurn(ds: DaemonSession, turnId?: string): st
 }
 
 /** Reactions remain governed by ownerOnlyProgress; only the process channels
- * move to a DM. Keep these decisions separate. */
+ * move to a DM. Keep these decisions separate.
+ * A group whose only human is the owner still suppresses the streaming card
+ * here; its native thinking bubble is allowed back under the original message
+ * by {@link ownerProgressShownInGroup}. */
 export function publicProgressSuppressed(ds: DaemonSession, turnId?: string): boolean {
   const exact = ownerPrivateProgressTurn(ds, turnId);
   return ownerOnlyProgressSuppressed(ds, exact)
     || !!ownerPrivateProgressRecipient(ds.larkAppId, { ...ds.session, chatType: ds.chatType }, exact)
     || privateProgressSenderUnproven(ds.larkAppId, { ...ds.session, chatType: ds.chatType }, exact);
+}
+
+export type OwnerGroupAudience = 'owner-only' | 'shared';
+const audienceCache = new Map<string, { audience: OwnerGroupAudience; expiresAt: number }>();
+
+function audienceKey(appId: string, chatId: string): string {
+  return appId + '\0' + chatId;
+}
+
+export function noteOwnerGroupAudience(
+  appId: string, chatId: string, audience: OwnerGroupAudience, ttlMs: number, now = Date.now(),
+): void {
+  audienceCache.set(audienceKey(appId, chatId), { audience, expiresAt: now + ttlMs });
+}
+
+export function ownerGroupAudience(appId: string, chatId: string, now = Date.now()): OwnerGroupAudience | undefined {
+  const hit = audienceCache.get(audienceKey(appId, chatId));
+  if (!hit || hit.expiresAt <= now) return undefined;
+  return hit.audience;
+}
+
+/** Native thinking stays under the original group message only when this
+ * group is known to contain the owner and no other human. */
+export function ownerProgressShownInGroup(ds: DaemonSession, turnId?: string): boolean {
+  const exact = ownerPrivateProgressTurn(ds, turnId);
+  if (!exact || !ds.chatId) return false;
+  if (!ownerPrivateProgressRecipient(ds.larkAppId, { ...ds.session, chatType: ds.chatType }, exact)) return false;
+  return ownerGroupAudience(ds.larkAppId, ds.chatId) === 'owner-only';
+}
+
+export function __testOnly_resetOwnerGroupAudience(): void {
+  audienceCache.clear();
 }
 
 /** Lost/pruned attribution on a native group message cannot authorize public

@@ -178,7 +178,7 @@ import {
 } from './services/durable-lark-session-control.js';
 import { failedTurnCaller, recordLimitedFailedTurn, clearLimitedFailedTurn, recordFailedTurnTerminal, noteFailedTurnRecoveryInput } from './core/failed-turn-recovery.js';
 import { isSilentScheduledTurn } from './core/silent-schedule-turns.js';
-import { ownerOnlyProgressSuppressed, publicProgressSuppressed, ownerPrivateProgressTurn } from './core/owner-only-progress.js';
+import { ownerOnlyProgressSuppressed, publicProgressSuppressed } from './core/owner-only-progress.js';
 import { ownerPrivateProgressManager } from './core/owner-private-progress.js';
 import * as chatFirstSeenStore from './services/chat-first-seen-store.js';
 import { ensureDefaultOncallBound } from './services/oncall-store.js';
@@ -31414,11 +31414,8 @@ export async function startDaemon(botIndex?: number): Promise<void> {
         if (context.status === 'limited') recordLimitedFailedTurn(ds, context.turnId);
         else if (context.prevStatus === 'limited') clearLimitedFailedTurn(ds);
       } catch (error) { logger.error(`[recovery] quota snapshot failed: ${String(error)}`); }
-      const privateTurn = ownerPrivateProgressTurn(ds, context.turnId);
-      if (privateTurn && ownerPrivateProgressManager().eligible(ds, privateTurn)) {
-        void ownerPrivateProgressManager().update(ds, privateTurn, { status: context.status === 'limited' ? 'limited'
-          : context.status === 'stalled' ? 'waiting' : 'working' });
-      }
+      // Owner group progress is the native thinking bubble. A screen-status
+      // update must not also open the folded private summary card.
       if (publicProgressSuppressed(ds, context.turnId)) return;
       return cardRuntimeStatusBridge.publish({
         sessionId: ds.session.sessionId,

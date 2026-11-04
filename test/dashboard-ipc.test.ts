@@ -250,8 +250,8 @@ describe('dashboard IPC server', () => {
       expect(publish).not.toHaveBeenCalled();
       const good = await post({ ...origin, turnId, text: 'progress', sessionId: 'other', owner: 'ou_other', chatId: 'oc_other' });
       expect(good.status).toBe(200);
-      expect(await good.json()).toMatchObject({ ok: true, delivered: true, messageId: 'om_private_ipc' });
-      expect(publish).toHaveBeenCalledExactlyOnceWith(ds, turnId, { text: 'progress' });
+      expect(await good.json()).toMatchObject({ ok: true, route: 'cot', delivered: true });
+      expect(publish).not.toHaveBeenCalled();
     } finally { publish.mockRestore(); workerPool.setActiveSessionsRegistry(previousRegistry ?? new Map()); }
   });
 

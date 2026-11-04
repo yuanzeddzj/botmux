@@ -45,7 +45,7 @@ import { getBot, getBotClient } from '../../bot-registry.js';
 import { boundSubjectForTitle, subjectFromArgsString, type ToolSubject } from '../../services/cot-subject.js';
 import { fallbackTurnId, frozenReplyContextForTurn } from '../../core/reply-target.js';
 import { isSilentScheduledTurn } from '../../core/silent-schedule-turns.js';
-import { publicProgressSuppressed } from '../../core/owner-only-progress.js';
+import { ownerProgressShownInGroup, publicProgressSuppressed } from '../../core/owner-only-progress.js';
 import { pendingStartingCardPublication } from '../../core/starting-card-publication.js';
 import { TopicSendError } from '../../cli/topic-send-guard.js';
 import { privateReplyEnabled } from '../../core/private-reply.js';
@@ -88,6 +88,9 @@ interface CotState {
   finishStatus?: 'done' | 'interrupted';
   /** Worker loss is not evidence that an external adopted CLI stopped. */
   workerDisconnected?: boolean;
+  /** Set when this bubble is the owner's private-chat copy of a shared-group turn.
+   * Absent means the bubble belongs to the session chat, under the original message. */
+  privateOwnerOpenId?: string;
 }
 
 const states = new WeakMap<DaemonSession, CotState>();
@@ -382,22 +385,22 @@ function assertCotResponse(larkAppId: string, response: any, state?: CotState): 
 }
 
 async function apiCreate(ds: DaemonSession, state: CotState): Promise<void> {
-  const placement = cotPlacement(ds, state);
-  if (getBot(ds.larkAppId)?.config?.topicUnavailablePolicy === 'stop') {
+  const placement = state.privateOwnerOpenId ? {} : cotPlacement(ds, state);
+  if (!state.privateOwnerOpenId && getBot(ds.larkAppId)?.config?.topicUnavailablePolicy === 'stop') {
     const target = frozenReplyContextForTurn(ds, fallbackTurnId(ds, state.turnId)).target;
     if (placement.origin_message_id || target.mode === 'thread' || target.mode === 'quote') {
       await assertCotWriteAllowed(ds, state, placement.origin_message_id);
     }
   }
   const c = getBotClient(ds.larkAppId);
+  const privateOwner = state.privateOwnerOpenId;
   const res = await c.request({
     method: 'POST',
     url: '/open-apis/im/v1/message_cot',
-    params: { receive_id_type: 'chat_id' },
-    data: {
-      receive_id: ds.chatId,
-      ...placement,
-    },
+    params: { receive_id_type: privateOwner ? 'open_id' : 'chat_id' },
+    data: privateOwner
+      ? { receive_id: privateOwner }
+      : { receive_id: ds.chatId, ...placement },
     timeout: COT_REQUEST_TIMEOUT_MS,
   } as any);
   assertCotResponse(ds.larkAppId, res, state);
@@ -415,7 +418,7 @@ async function apiAppend(ds: DaemonSession, state: CotState, events: CotEvent[])
   const c = getBotClient(ds.larkAppId);
   // PUT body caps events at 50 per call.
   for (let i = 0; i < events.length; i += 50) {
-    if (getBot(ds.larkAppId)?.config?.topicUnavailablePolicy === 'stop') {
+    if (!state.privateOwnerOpenId && getBot(ds.larkAppId)?.config?.topicUnavailablePolicy === 'stop') {
       await assertCotWriteAllowed(ds, state, state.messageId);
     }
     const response = await c.request({
@@ -430,7 +433,7 @@ async function apiAppend(ds: DaemonSession, state: CotState, events: CotEvent[])
 
 /** Best-effort error-path completion (normal completion rides RUN_FINISHED). */
 async function apiComplete(ds: DaemonSession, state: CotState, reason: 'done' | 'error'): Promise<void> {
-  if (getBot(ds.larkAppId)?.config?.topicUnavailablePolicy === 'stop') {
+  if (!state.privateOwnerOpenId && getBot(ds.larkAppId)?.config?.topicUnavailablePolicy === 'stop') {
     await assertCotWriteAllowed(ds, state, state.messageId);
   }
   const c = getBotClient(ds.larkAppId);
@@ -719,11 +722,17 @@ async function pump(ds: DaemonSession, state: CotState): Promise<void> {
 export function handleCotThinkingUpdate(
   ds: DaemonSession,
   msg: Extract<WorkerToDaemon, { type: 'thinking_update' }>,
+  delivery?: { ownerOpenId: string },
 ): boolean {
   // Thinking bubbles are outbound messages too. Keep silent fires quiet even
   // when /cot show is armed, without suppressing another turn in this session.
   if (isSilentScheduledTurn(ds, msg.turnId) || ds.session.hiddenThinkingTurns?.includes(msg.turnId)) return false;
-  if (publicProgressSuppressed(ds, msg.turnId)) return false;
+  // Shared-group owner turns stay out of the group. A known owner-only group
+  // puts the same native bubble under the original message. An explicit
+  // owner open_id sends that bubble to the private chat instead.
+  if (publicProgressSuppressed(ds, msg.turnId)
+    && !delivery?.ownerOpenId
+    && !ownerProgressShownInGroup(ds, msg.turnId)) return false;
   if (!cotEnabled(ds)) return false;
   const key = turnKeyOf(msg);
   let state = states.get(ds);
@@ -742,6 +751,7 @@ export function handleCotThinkingUpdate(
       settled: false,
       sentCount: 0,
       pumping: false,
+      ...(delivery?.ownerOpenId ? { privateOwnerOpenId: delivery.ownerOpenId } : {}),
     };
     states.set(ds, state);
     rememberRecentState(ds, state);

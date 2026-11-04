@@ -11866,6 +11866,12 @@ async function cmdSend(rest: string[]): Promise<void> {
         { turnId: privateTurnId, text: content });
       const result = await response.json() as { ok?: boolean; delivered?: boolean; messageId?: string; route?: string };
       originalRouteAuthorized = response.ok && result.ok === true && result.route === 'original';
+      if (response.ok && result.ok === true && result.route === 'cot') {
+        console.error('过程展示在原生思考消息里，不另发进展卡。');
+        console.log(JSON.stringify({ success: true, private: true, route: 'cot', delivered: true,
+          responseKind: effectiveResponseKind, sessionId: presentationSource.sessionId, turnId: privateTurnId }));
+        return;
+      }
       if (response.ok && result.ok && result.delivered && result.messageId) {
         receipt = { delivered: true, messageId: result.messageId };
       }

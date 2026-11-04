@@ -142,6 +142,7 @@ import { getSessionUsageSnapshot } from './cost-calculator.js';
 import { repairReplyMarkdown } from '../services/reply-markdown.js';
 import { renderBrandTemplate } from '../im/lark/brand-template.js';
 import { cotEnabled, cotToolResultEnabled, handleCotThinkingUpdate, handleCotThinkingSuperseded, finalizeCotMessage, abortCotMessage } from '../im/lark/cot-message.js';
+import { presentOwnerGroupProgress } from './owner-progress-cot.js';
 import { replyCardModeFor, replyCardSandboxBlocked, updateTurnReplyCard, queueTurnReplyTools, flushTurnReplyTools, settleTurnReplyCards, supersedeTurnReplyCard } from './turn-reply-card.js';
 import { captureTerminalReplyContext } from './terminal-reply-context.js';
 import { ReplyCardWithdrawnError } from '../services/turn-reply-card.js';
@@ -17334,7 +17335,7 @@ function setupWorkerHandlers(
         if (ownerPrivateProgressManager().eligible(ds, msg.turnId)) {
           if (cotEnabled(ds)) {
             const entries = cotToolResultEnabled(ds) ? msg.entries : msg.entries.filter(entry => entry.kind !== 'tool_result');
-            void ownerPrivateProgressManager().update(ds, msg.turnId, { entries });
+            void presentOwnerGroupProgress(ds, { type: 'thinking_update', entries, turnId: msg.turnId, dispatchAttempt: msg.dispatchAttempt });
           }
           break;
         }

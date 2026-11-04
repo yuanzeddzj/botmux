@@ -22,6 +22,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { handleCotThinkingUpdate, finalizeCotMessage, abortCotMessage, sweepOrphanCotMessages, settleCotMessageForShutdown } from '../src/im/lark/cot-message.js';
 import { getBot } from '../src/bot-registry.js';
+import { __testOnly_resetOwnerGroupAudience, noteOwnerGroupAudience } from '../src/core/owner-only-progress.js';
 import { armSilentScheduledTurn } from '../src/core/silent-schedule-turns.js';
 import { t, localeForBot } from '../src/i18n/index.js';
 import { writeRoleReplyPrivately } from '../src/core/role-resolver.js';
@@ -59,6 +60,7 @@ function pushedEvents(): Array<{ type: string; content: any }> {
 }
 
 beforeEach(() => {
+  __testOnly_resetOwnerGroupAudience();
   request.mockReset().mockImplementation(async (req: any) => {
     if (req.method === 'POST' && req.url === '/open-apis/im/v1/message_cot') {
       return { code: 0, data: { cot_id: 'cot1', message_id: 'om_cot_msg1' } };
@@ -114,6 +116,51 @@ describe('handleCotThinkingUpdate', () => {
     expect(finalizeCotMessage(ds, 'om_human', 'completed')).toBe(true);
     await flush();
     expect(pushedEvents().some(event => event.type === 'RUN_FINISHED')).toBe(true);
+  });
+
+  it('sends the same native bubble to the owner private chat for a shared group', async () => {
+    vi.mocked(getBot).mockReturnValue({ config: { cotEnabled: true, ownerProgressToDm: true } } as any);
+    const ds = makeDs({
+      chatType: 'group',
+      session: {
+        chatType: 'group', chatId: 'oc_chat1',
+        replyTargets: {
+          om_turn1: {
+            senderOpenId: 'ou_owner', rootMessageId: 'om_root1', updatedAt: '2026-11-05',
+            participants: [{ openId: 'ou_owner', isBot: false }],
+          },
+        },
+      },
+    });
+    expect(handleCotThinkingUpdate(ds, upd([think('step 1')]))).toBe(false);
+    expect(handleCotThinkingUpdate(ds, upd([think('step 1')]), { ownerOpenId: 'ou_owner' })).toBe(true);
+    await flush();
+    const create = request.mock.calls.find(([req]) => req.method === 'POST')![0];
+    expect(create.params).toEqual({ receive_id_type: 'open_id' });
+    expect(create.data).toEqual({ receive_id: 'ou_owner' });
+    expect(pushedEvents()[3].content.delta).toBe('step 1');
+  });
+
+  it('keeps the native bubble under the original message when the group has only the owner', async () => {
+    vi.mocked(getBot).mockReturnValue({ config: { cotEnabled: true, ownerProgressToDm: true } } as any);
+    noteOwnerGroupAudience('app1', 'oc_chat1', 'owner-only', 60_000);
+    const ds = makeDs({
+      chatType: 'group',
+      session: {
+        chatType: 'group', chatId: 'oc_chat1',
+        replyTargets: {
+          om_turn1: {
+            senderOpenId: 'ou_owner', rootMessageId: 'om_root1', updatedAt: '2026-11-05',
+            participants: [{ openId: 'ou_owner', isBot: false }],
+          },
+        },
+      },
+    });
+    expect(handleCotThinkingUpdate(ds, upd([think('step 1')]))).toBe(true);
+    await flush();
+    const create = request.mock.calls.find(([req]) => req.method === 'POST')![0];
+    expect(create.params).toEqual({ receive_id_type: 'chat_id' });
+    expect(create.data).toEqual({ receive_id: 'oc_chat1', origin_message_id: 'om_root1', reply_in_thread: true });
   });
 
   it('topic session: creates INSIDE the topic (root anchor + reply_in_thread), sends the AG-UI prologue', async () => {
